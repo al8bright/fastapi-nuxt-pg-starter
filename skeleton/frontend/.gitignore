@@ -1,0 +1,9 @@
+# Nuxt / Nitro 산출물 (루트 .gitignore 보완)
+.nuxt/
+.output/
+.data/
+dist/
+node_modules/
+.env
+.env.*
+!.env.example
