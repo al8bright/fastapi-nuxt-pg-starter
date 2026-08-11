@@ -242,6 +242,11 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
 - 프론트 dev 서버: `/login` 이 `<title>MyProject</title>` 를 가진 SPA HTML 셸을 반환하고
   `runtimeConfig.public` 이 `.env` 값대로 주입됨. `/api/v1/*` 요청은 nitro devProxy 로 백엔드에 전달되어
   health·login 응답이 그대로 돌아옴
+- 브라우저(Chrome) 실제 렌더링: 4개 화면 확인 — `/login` 로그인 → 메인(`/`) 에 사용자명 표시 →
+  `/landing` 의 백엔드·데이터베이스 배지 모두 "정상" → `/my` 의 아이디·권한 표시.
+  DESIGN.md 테마가 실제 화면에 적용되고 콘솔 에러 없음
+- 인증 가드: 로그아웃 시 `localStorage` 토큰이 지워지고, 보호 라우트(`/my`) 재진입 시
+  `auth` 미들웨어가 `/login` 으로 리다이렉트함
 
 **미검증**
 
@@ -250,8 +255,6 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
 - `scaffold.ps1`(Windows/PowerShell): 실행 환경이 없어 검증하지 못했다. bash 판과 동일한
   `skeleton/`·`DESIGN.md` 를 사용하지만 결과 동일성은 확인되지 않았다.
 - 스캐폴드의 자동 설치 단계(`--skip-install` 없이 실행)는 거치지 않았다. pip/pnpm 설치는 수동으로 확인했다.
-- 브라우저 실제 렌더링·화면 조작(로그인 폼 제출, 보호 라우트 리다이렉트, 테마 적용 육안 확인)은
-  HTTP 레벨까지만 확인했고 실제 브라우저로는 검증하지 않았다.
 - `pnpm preview` / `node .output/server/index.mjs` 로 빌드 산출물을 띄우는 경로는 확인하지 않았다.
 
 **알려진 문제**
@@ -260,6 +263,7 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
   그래서 `scaffold.sh` 가 넘기는 임시 폴더를 무시하고 `PROJECT_ROOT` 를 `skeleton/` 으로 잡아
   템플릿의 `skeleton/.python-version`·`skeleton/.nvmrc` 를 덮어쓴다.
   pyenv·fnm 이 PATH 에 없는 셸에서 `scaffold.sh` 를 돌리면 재현된다.
-- `nuxt dev` 는 `[::1]`(IPv6) 에만 바인딩한다. `127.0.0.1:5173` 은 연결이 거부되므로 `localhost:5173` 으로 접속해야 한다.
+- ~~`nuxt dev` 가 `[::1]`(IPv6) 에만 바인딩해 `127.0.0.1:5173` 접속이 거부되는 문제~~ →
+  `nuxt.config.ts` 의 `devServer.host` 를 `0.0.0.0` 으로 지정해 해결했다. `localhost`·`127.0.0.1`·LAN 주소 모두 접속 확인.
 
 버전은 caret 범위이므로 필요 시 `pnpm up` / `pip` 로 갱신 가능하다.
