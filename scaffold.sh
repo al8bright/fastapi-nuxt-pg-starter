@@ -91,6 +91,27 @@ _meets(){
   }'
 }
 
+# pyenv shim 은 .python-version 이 없는 폴더에서 global(대개 system Python)로 풀린다.
+# 템플릿 루트에는 핀 파일이 없으므로, 버전 검증과 venv 생성이 올바른 인터프리터를 보도록
+# 설치된 버전 중 (핀 우선 → 하한 충족 최신) 을 PYENV_VERSION 으로 명시 선택한다.
+_select_pyenv_python() {
+  command -v pyenv >/dev/null 2>&1 || return 0
+  local pin_file="$1" pin="" v="" best=""
+  [ -n "$pin_file" ] && [ -f "$pin_file" ] && pin="$(head -n1 "$pin_file" | tr -d '[:space:]')"
+  if [ -n "$pin" ] && pyenv versions --bare 2>/dev/null | grep -qx "$pin"; then
+    export PYENV_VERSION="$pin"
+    return 0
+  fi
+  for v in $(pyenv versions --bare 2>/dev/null); do
+    case "$v" in [0-9]*) ;; *) continue ;; esac
+    _meets "${MIN_PYTHON:-3.13}" "$v" || continue
+    if [ -z "$best" ] || _meets "$best" "$v"; then best="$v"; fi
+  done
+  [ -n "$best" ] && export PYENV_VERSION="$best"
+  return 0
+}
+_select_pyenv_python "$SKELETON_DIR/.python-version"
+
 # bootstrap 이 필요한 기준은 "런타임이 하한 미달"이다 (versions.env 정책: 이상이면 재사용).
 # ⛔ pyenv/fnm 이 없다는 이유만으로 bootstrap 을 강제하지 않는다 — 이미 조건을 만족한 환경까지
 # 골격 생성 전에 막아버린다.
@@ -139,6 +160,7 @@ if [ "$_need_bootstrap" = "1" ]; then
     fi
     _activate_version_managers                                    # bootstrap 후 현재 프로세스에 재적용
     command -v fnm >/dev/null 2>&1 && fnm use "${MIN_NODE:-24}" 2>/dev/null || true  # Node 버전 명시 활성화
+    _select_pyenv_python "$_PIN_DIR/.python-version"              # bootstrap 이 방금 고정한 버전을 우선 선택
 
     # 검증 기준은 "런타임이 하한을 충족하는가"이지 "pyenv·fnm 이 설치됐는가"가 아니다 —
     # 관리자 없이 기존 설치본을 재사용하는 경로가 정상 경로이기 때문이다.
