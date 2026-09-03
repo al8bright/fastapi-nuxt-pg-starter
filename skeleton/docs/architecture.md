@@ -23,7 +23,7 @@
 | 8 | **계층 분리** — 라우터(`api/`)는 HTTP만 얇게, 도메인 로직은 `services/`, 검증/직렬화는 `schemas/` | §4, §8 |
 | 9 | **프론트 표준 스택 고정**: `$fetch`(ofetch) + Nuxt `useAsyncData`/`useFetch` + Pinia. ⛔ 서버 상태를 `ref` + `onMounted`로 직접 패칭 금지 | §2, §13 |
 | 10 | **패키지 매니저는 pnpm** — ⛔ npm 사용 금지 | §2 |
-| 11 | **인증은 Bearer JWT** — `Authorization: Bearer <token>`, 검증 실패 시 401 | §9 |
+| 11 | **인증은 access JWT(메모리, 15분) + refresh HttpOnly 쿠키(DB `sessions`, 회전)** — API 요청은 `Authorization: Bearer <access>`, 검증 실패 시 401. ⛔ 토큰의 `localStorage` 저장 금지 | §9 |
 | 12 | **테스트는 pytest + SQLite in-memory** — `get_settings.cache_clear()` autouse, `dependency_overrides`로 격리 | §12 |
 | 13 | **TDD + Tidy First** — Red→Green→Refactor, 구조 변경과 동작 변경을 한 커밋에 섞지 않음 | §18 |
 | 14 | **커밋 메시지**: `[Structural]`/`[Behavioral]` + conventional type, 테스트·린트 통과 시에만 | §19 |
@@ -54,7 +54,7 @@
 | **프론트 라우트 디렉토리** | `kebab-case` (URL 세그먼트가 그대로 됨) | `app/pages/my-page/` |
 | **프론트 컴포저블 파일** | `use<Domain>.ts` (`app/composables/`) | `useAuth.ts`, `useHealth.ts` |
 | **환경변수 접두** | 백엔드는 `UPPER_SNAKE`, 프론트는 **`NUXT_PUBLIC_` 필수** | `DATABASE_URL`, `NUXT_PUBLIC_API_BASE_URL` |
-| **토큰 저장 키** | `<project>_token` / `<project>_access_token` 으로 충돌 방지 | `my_project_token`, `shop_access_token` |
+| **refresh 쿠키 이름** | `refresh_token` 고정(HttpOnly, `Path=/api/v1/auth`) — access 토큰은 저장소 키가 없다(메모리 전용, §9·§14) | `refresh_token` |
 
 > 프론트 환경변수는 **`VITE_` 가 아니라 `NUXT_PUBLIC_` 접두를 쓴다.** Nuxt 는 `nuxt.config.ts` 의
 > `runtimeConfig.public` 을 단일 창구로 삼고, 그 값은 `NUXT_PUBLIC_*` 환경변수로 덮인다.
@@ -71,7 +71,7 @@
 - **DB 드라이버**: PostgreSQL + `psycopg2-binary`
 - **설정**: `pydantic-settings` (BaseSettings)
 - **검증/직렬화**: Pydantic 2.x
-- **인증**: JWT. **자체 계정 → `PyJWT`**, **OIDC/SSO 연동 → `python-jose[cryptography]`**
+- **인증**: access JWT(`PyJWT`) + 불투명 refresh 토큰(DB `sessions` 테이블, §9). **OIDC/SSO 연동 → `python-jose[cryptography]`**
 - **테스트**: `pytest` + SQLite in-memory
 - **HTTP 클라이언트(서버↔서버)**: `httpx2` (httpx 의 유지보수 후속, Starlette 1.x TestClient 호환)
 - **버전 고정**: `requirements.txt`에 **`==` 정확한 버전 핀** (재현성 우선)
@@ -79,10 +79,10 @@
 ### 프론트엔드
 - **빌드/런타임**: Nuxt 4.5 (**SPA 모드**) + Vue 3.5 + TypeScript 6.0
   - SPA 고정: `nuxt.config.ts`의 `ssr: false` + 정적 생성(`nuxt generate` → `200.html` SPA fallback 포함).
-    백엔드가 별도 FastAPI 서버이고 JWT를 `localStorage`에 두므로 **SSR을 쓰지 않는다.**
+    백엔드가 별도 FastAPI 서버이고 인증 상태를 클라이언트(메모리 + HttpOnly 쿠키)가 들고 가므로 **SSR을 쓰지 않는다.**
 - **라우팅**: **Nuxt 파일 기반 라우팅**(`app/pages/`). 인증 가드는 `app/middleware/auth.ts`(§14)
 - **HTTP**: **`$fetch`(ofetch) 인스턴스 + 인터셉터** — `app/plugins/api.ts`에서 `$fetch.create()`로
-  `onRequest`(Bearer 주입)/`onResponseError`(401 일괄 처리)를 붙여 `$api`로 provide 한다. **axios 를 쓰지 않는다.**
+  `credentials: "include"` + `onRequest`(메모리 access 토큰 Bearer 주입) + 401 시 refresh 1회 후 재시도(§14)를 붙여 `$api`로 provide 한다. **axios 를 쓰지 않는다.**
 - **서버 상태**: **Nuxt 내장 `useAsyncData` / `useFetch`** (키 기반 캐싱/재요청/무효화). 별도 쿼리 라이브러리를 쓰지 않는다.
 - **클라이언트 상태**: **Pinia** 4.0 (`@pinia/nuxt`) — 토큰·세션 등 전역 상태는 `app/stores/*.ts`의 setup store 에 둔다.
 - **스타일**: Tailwind CSS v4 4.3 (CSS-first `@theme`)
@@ -137,7 +137,7 @@ backend/app/
 ├── api/
 │   ├── v1/                 # ★ /api/v1 버전 디렉토리
 │   │   ├── router.py       # 하위 라우터 집계
-│   │   ├── auth.py         # SSO 시작 / 콜백 / 세션
+│   │   ├── auth.py         # login / refresh / logout / me (자체 계정) 또는 SSO 시작·콜백
 │   │   ├── health.py
 │   │   └── <domain>.py     # 도메인별 APIRouter (얇은 HTTP 계층)
 │   └── ...
@@ -223,9 +223,13 @@ class Settings(BaseSettings):
     # DB
     database_url: str | None = None
 
-    # JWT
-    secret_key: str = "change-me-in-production"
-    access_token_expire_minutes: int = 30
+    # 인증 (§9)
+    secret_key: str = ""                        # 32자 미만·기본값이면 기동 거부 (검증은 §9)
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 14
+    cookie_secure: bool = False                 # 운영(HTTPS)에서는 true
+    initial_admin_username: str | None = None   # 미설정이면 관리자 시드 스킵
+    initial_admin_password: str | None = None
 
     # CORS
     cors_origins: str = "http://localhost:5173"
@@ -360,12 +364,67 @@ class Order(Base):
 
 ---
 
-## 9. 인증 (JWT · SSO)
+## 9. 인증 (access JWT + refresh 세션 · SSO)
 
-- `core/security.py`에 토큰 생성/검증과 `now()`를 둔다.
-- **자체 계정**: access/refresh 토큰 분리(`typ` 클레임), `PyJWT`.
-- **OIDC SSO 연동**: 백엔드가 authorize→callback→userinfo 처리 후 앱 세션 JWT 발급, `python-jose`.
-- 토큰은 `Authorization: Bearer <token>` 헤더. 검증 실패는 401 + `WWW-Authenticate: Bearer`.
+`core/security.py`에 토큰 생성/검증과 `now()`를 둔다.
+
+### 토큰 모델 (자체 계정)
+
+- **access 토큰**: JWT(HS256, `PyJWT`), 만료 **15분**(`ACCESS_TOKEN_EXPIRE_MINUTES`), `sub` = user id.
+  로그인/refresh **응답 바디**로만 내려주고, 클라이언트는 **메모리에만** 보관한다(§14).
+  API 요청은 `Authorization: Bearer <access>` 헤더. 검증 실패는 401 + `WWW-Authenticate: Bearer`.
+- **refresh 토큰**: JWT 가 아니라 **불투명(opaque) 토큰**(`secrets.token_urlsafe(48)`).
+  DB `sessions` 테이블에 **SHA-256 해시만** 저장한다 — 서버가 원문을 갖지 않으므로 DB 가 유출돼도
+  토큰을 복원할 수 없고, JWT 와 달리 **세션 단위 즉시 폐기(revoke)** 가 가능하다. 이것이 불투명 토큰을 쓰는 이유다.
+- **refresh 쿠키**: 이름 `refresh_token`, **HttpOnly**(JS 접근 불가 → XSS 로 탈취 불가),
+  `SameSite=Lax`, `Secure=COOKIE_SECURE`(.env), **`Path=/api/v1/auth`**(auth 경로에만 전송돼 CSRF 표면 최소화),
+  `Max-Age=REFRESH_TOKEN_EXPIRE_DAYS`(기본 14일).
+
+### `sessions` 테이블 (Alembic 0003)
+
+`id`, `user_id`(FK), `refresh_token_hash`(unique), `expires_at`, `created_at`, `last_used_at`, `revoked_at`.
+
+### 엔드포인트
+
+- `POST /api/v1/auth/login` — 검증 성공 시 access(바디) + refresh(쿠키) 발급. **429 rate limit 적용**(아래).
+- `POST /api/v1/auth/refresh` — **회전(rotation)**: 기존 세션을 revoke 하고 새 refresh 를 재발급한다.
+  **revoke 된 토큰이 재사용되면 탈취로 간주**하고 그 사용자의 **모든 세션을 revoke** 한다(재사용 감지).
+- `POST /api/v1/auth/logout` — 204. 세션 revoke + 쿠키 삭제.
+- `GET /api/v1/auth/me` — 현재 사용자.
+
+### 브루트포스 방어
+
+- 로그인 실패는 **(username, client IP)별 5분 창 5회** 를 넘으면 **429 + `Retry-After`**.
+- 카운터는 **인메모리**다 — **단일 프로세스 전제**. 다중 워커/다중 인스턴스 배포에서는 Redis 등 공유 저장소로 교체해야 한다.
+
+### 비밀번호 정책 (NIST 800-63B 권고 방식)
+
+- **최소 8자**, **UTF-8 72바이트 이하**(bcrypt 가 72바이트 초과분을 무시하는 한계 방어), **조합 규칙 없음**.
+- `create_user` 에서 강제한다.
+
+### SECRET_KEY · 초기 관리자
+
+- `SECRET_KEY` 가 **32자 미만이거나 기본값이면 `Settings` 검증에서 기동을 거부**한다 — 약한 키로 서명된
+  JWT 는 오프라인 크래킹에 뚫리므로 실수로 운영에 나가는 것 자체를 막는다. 스캐폴드가 `.env` 에 랜덤 생성해 넣는다.
+- 초기 관리자는 `INITIAL_ADMIN_USERNAME`/`INITIAL_ADMIN_PASSWORD` 를 **`.env` 로 주입**한다(스캐폴드가 랜덤 생성해 출력).
+  미설정이면 시드를 건너뛴다. ⛔ **하드코딩 기본 계정(예: admin/admin123)은 금지** — 코드에 박힌 자격증명은
+  저장소를 보는 모두에게 노출되고, 배포마다 같은 값이라 스캔 공격의 첫 표적이 된다.
+
+### 보안 응답 헤더 · CORS
+
+- 전 응답: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: strict-origin-when-cross-origin`, `Cross-Origin-Opener-Policy: same-origin`.
+  `COOKIE_SECURE=true` 이면 HSTS 추가. `/api/v1/auth` 응답은 `Cache-Control: no-store`.
+- CORS 는 필요한 메서드/헤더만 명시한다(`Authorization`, `Content-Type`).
+
+### 배포 전제 (same-site)
+
+- `SameSite=Lax` 쿠키이므로 **프론트와 API 는 same-site 로 배포**한다(예: `app.example.com` + `api.example.com`).
+- 완전 크로스 사이트 배포는 지원하지 않는다 — 하려면 `SameSite=None` + 별도 CSRF 대책이 필요하다.
+
+### OIDC SSO 연동 (선택)
+
+- 백엔드가 authorize→callback→userinfo 처리 후 앱 세션 JWT 발급, `python-jose`.
 - 최초 로그인 시 `provision_from_userinfo()`로 사용자 upsert(없으면 생성, 식별정보 갱신).
 
 ---
@@ -440,10 +499,9 @@ frontend/
 └── app/
     ├── app.vue                  # 앱 셸 — <NuxtLayout><NuxtPage /></NuxtLayout>
     ├── assets/css/main.css      # Tailwind v4 @import + @theme 토큰 + body 스타일
-    ├── lib/
-    │   └── token.ts             # getToken/setToken/clearToken — localStorage 래퍼 (client 가드 필수)
     ├── plugins/
-    │   └── api.ts               # ★ $fetch.create + 인터셉터(토큰 주입/401) → provide('api', ...)
+    │   ├── api.ts               # ★ $fetch.create + 인터셉터(access 주입/401→refresh 재시도) → provide('api', ...)
+    │   └── auth-init.ts         # 부팅 시 /auth/refresh 로 세션 복원 (SPA 새로고침 대응)
     ├── api/
     │   ├── auth.ts              # useAuthApi() — login()/getMe() + User/UserRole/TokenResponse 타입
     │   └── health.ts            # useHealthApi() — getHealth()/getDbHealth() + DbHealth 타입
@@ -451,9 +509,9 @@ frontend/
     │   ├── useAuth.ts           # useMe() = useAsyncData 래퍼 / useLogin() = 수동 뮤테이션 헬퍼
     │   └── useHealth.ts         # useHealthStatus(), useDbHealthStatus()
     ├── stores/
-    │   └── auth.ts              # Pinia setup store — 전역 인증 상태 (token, user)
+    │   └── auth.ts              # Pinia setup store — 전역 인증 상태 (access 토큰은 메모리에만, user)
     ├── middleware/
-    │   └── auth.ts              # 인증 가드 — 토큰 없으면 navigateTo('/login')
+    │   └── auth.ts              # 인증 가드 — 미인증이면 navigateTo('/login')
     └── pages/
         ├── index.vue            # /          메인            (definePageMeta 가드)
         ├── login.vue            # /login     로그인 (가드 없음)
@@ -463,29 +521,34 @@ frontend/
 
 `app/plugins/api.ts` (`$fetch` 인스턴스 표준 — axios 대체):
 ```ts
-import { clearToken, getToken } from "~/lib/token"
-
-// 앱 전역 HTTP 클라이언트 (architecture.md §13).
+// 앱 전역 HTTP 클라이언트 (architecture.md §13·§14).
 // axios 를 쓰지 않는다 — Nuxt 내장 $fetch(ofetch) 인스턴스에 인터셉터를 붙인다.
 export default defineNuxtPlugin(() => {
   const { public: publicConfig } = useRuntimeConfig()
   const baseUrl = publicConfig.apiBaseUrl
+  const authStore = useAuthStore()
 
   const api = $fetch.create({
     baseURL: baseUrl ? `${baseUrl}/api/v1` : "/api/v1",
+    credentials: "include",   // ★ refresh 쿠키 전송 (auth 경로에만 붙는다 — Path=/api/v1/auth)
 
-    // 요청 인터셉터: Bearer 토큰 주입.
+    // 요청 인터셉터: 메모리(Pinia)의 access 토큰을 Bearer 로 주입.
     onRequest({ options }) {
-      const token = getToken()
+      const token = authStore.accessToken
       if (token) options.headers.set("Authorization", `Bearer ${token}`)
     },
 
-    // 응답 인터셉터: 401 이면 토큰을 버리고 로그인 화면으로 보낸다.
-    onResponseError({ response }) {
-      if (response.status === 401) {
-        clearToken()
+    // 응답 인터셉터: 401 이면 refresh 1회(single-flight) 후 원 요청을 재시도한다.
+    // refresh 까지 실패하면 세션을 버리고 /login 으로 보낸다(§14).
+    async onResponseError({ request, response, options }) {
+      if (response.status !== 401) return
+      const refreshed = await authStore.refreshOnce()   // 동시 401 은 하나의 refresh 로 합류
+      if (!refreshed) {
+        authStore.clearSession()
         if (import.meta.client && location.pathname !== "/login") location.href = "/login"
+        return
       }
+      // 새 access 토큰으로 원 요청 1회 재시도 (재귀 방지 플래그는 구현에서 관리)
     },
   })
 
@@ -496,38 +559,43 @@ export default defineNuxtPlugin(() => {
 - ⚠️ `onRequest({ options })` 의 **`options.headers` 는 `Headers` 인스턴스**다 → `options.headers.set(...)`.
   axios 식 `config.headers.Authorization = ...` 대입은 타입도 런타임도 틀린다.
 - ofetch 는 4xx/5xx 를 throw 하므로 **401 처리는 `onResponse` 가 아니라 `onResponseError`** 에 둔다.
+- ⚠️ refresh 는 **single-flight** 로 만든다 — 동시에 터진 401 들이 각자 refresh 를 부르면
+  회전(rotation) 때문에 서로의 토큰을 revoke 해 재사용 감지에 걸린다. 진행 중인 refresh Promise 하나를 공유한다.
 
 `app/stores/auth.ts` (Pinia setup store — 전역 클라이언트 상태):
 ```ts
 import { defineStore } from "pinia"
 import type { User } from "~/api/auth"           // ← app/api/* 는 auto-import 대상이 아니다
-import { clearToken, getToken, setToken } from "~/lib/token"
 
-// 클라이언트 전역 상태 (architecture.md §13).
+// 클라이언트 전역 상태 (architecture.md §13·§14).
+// ★ access 토큰은 "메모리에만" 둔다 — localStorage/쿠키에 쓰지 않는다.
+//   새로고침으로 날아간 세션은 plugins/auth-init.ts 가 /auth/refresh 로 복원한다.
 // options store 가 아니라 setup store 형태로 통일한다.
 export const useAuthStore = defineStore("auth", () => {
-  const token = ref<string | null>(getToken())
+  const accessToken = ref<string | null>(null)
   const user = ref<User | null>(null)
 
   // 파생값은 computed 다 — 사용처에서 괄호 없이 `auth.isAuthenticated`.
-  const isAuthenticated = computed(() => Boolean(token.value))
+  const isAuthenticated = computed(() => Boolean(accessToken.value))
 
   function setSession(nextToken: string): void {
-    setToken(nextToken)
-    token.value = nextToken
+    accessToken.value = nextToken
   }
 
   function setUser(nextUser: User | null): void {
     user.value = nextUser
   }
 
-  function logout(): void {
-    clearToken()
-    token.value = null
+  function clearSession(): void {
+    accessToken.value = null
     user.value = null
   }
 
-  return { token, user, isAuthenticated, setSession, setUser, logout }
+  // POST /auth/refresh 를 single-flight 로 감싼 액션 —
+  // 진행 중이면 같은 Promise 를 돌려줘 동시 401 이 refresh 를 중복 호출하지 않게 한다.
+  async function refreshOnce(): Promise<boolean> { /* 구현은 스캐폴드 참조 */ }
+
+  return { accessToken, user, isAuthenticated, setSession, setUser, clearSession, refreshOnce }
 })
 ```
 - `@pinia/nuxt` 가 `app/stores/*` 를 스캔하므로 컴포넌트에서는 **import 없이 `useAuthStore()`** 로 쓴다.
@@ -615,14 +683,22 @@ export function useLogin() {
 
 ## 14. 프론트엔드 인증 흐름
 
-- **SSO**: `app/pages/login.vue`에서 `window.location.href = ${config.public.backendUrl}/api/v1/auth/login`.
-- **콜백**: `app/pages/auth/callback.vue`가 토큰 수신 → `auth.setSession(token)` → `/api/v1/auth/me`로 사용자 로드 → 홈 리다이렉트.
+- **토큰 보관**: access 토큰은 **Pinia 메모리에만** 둔다. ⛔ **`localStorage` 저장 금지** — XSS 한 방에 통째로
+  털리는 저장소다. refresh 토큰은 **HttpOnly 쿠키**라 JS 에서 아예 보이지 않고, 브라우저가 알아서
+  `/api/v1/auth/*` 요청에만 실어 보낸다(§9).
+- **로그인**: `POST /api/v1/auth/login` 성공 → 바디의 access 토큰을 `auth.setSession(token)` 으로 메모리에 넣고
+  (refresh 쿠키는 응답의 `Set-Cookie` 로 자동 저장), `setUser(await getMe())` 로 사용자 로드 → 홈 이동.
+- **세션 복원(새로고침 대응)**: 메모리 토큰은 새로고침에 날아간다 → **`app/plugins/auth-init.ts`** 가 앱 부팅 시
+  `POST /api/v1/auth/refresh` 를 한 번 호출해 쿠키가 살아 있으면 access 토큰을 재발급받는다(없으면 미인증으로 시작).
+- **401 처리**: `$api` 가 401 을 받으면 **refresh 1회(single-flight) 후 원 요청을 재시도**하고,
+  refresh 도 실패하면 세션을 비우고 `/login` 으로 보낸다(§13). ⛔ 개별 컴포넌트에서 401 을 따로 처리하지 않는다.
+- **로그아웃**: `POST /api/v1/auth/logout`(서버가 세션 revoke + 쿠키 삭제) → `auth.clearSession()` → `/login`.
 - **보호 라우트**: `app/middleware/auth.ts` 라우트 미들웨어가 담당한다(미인증 시 `navigateTo('/login', { replace: true })`).
   보호할 페이지마다 `definePageMeta({ middleware: 'auth' })` 한 줄을 선언한다 — 파일 위치를 옮길 필요가 없다.
-- 토큰은 `localStorage`(키: `<project>_token`). 401은 `$api`의 `onResponseError`가 일괄 처리(§13).
-- ⚠️ `app/lib/token.ts` 의 `getToken`/`setToken`/`clearToken` 에는 **`import.meta.client` 가드가 필수**다.
-  `ssr: false` 라도 빌드의 **정적 생성 단계는 Node 에서 돌아** `localStorage` 가 없다(가드가 없으면 빌드가 깨진다).
-- ⚠️ 미들웨어도 같은 이유로 **`import.meta.client` 일 때만** 리다이렉트한다. 서버(생성) 단계에서는 통과시켜 빈 셸만 만든다.
+- **SSO(선택)**: `app/pages/login.vue`에서 `window.location.href = ${config.public.backendUrl}/api/v1/auth/login`,
+  `app/pages/auth/callback.vue`가 토큰 수신 → `auth.setSession(token)` → `/api/v1/auth/me`로 사용자 로드 → 홈 리다이렉트.
+- ⚠️ 미들웨어는 **`import.meta.client` 일 때만** 리다이렉트한다. `ssr: false` 라도 빌드의 **정적 생성 단계는
+  Node 에서 돌아** 인증 상태가 없다 — 서버(생성) 단계에서는 통과시켜 빈 셸만 만든다.
 - ⚠️ 내부 이동은 `navigateTo()`(스크립트) / `<NuxtLink to="...">`(템플릿)를 쓴다. `router.push` 직접 호출·`<a href>` 하드코딩 금지.
 
 ```
@@ -638,12 +714,11 @@ app/
 
 ```ts
 // app/middleware/auth.ts
-import { getToken } from "~/lib/token"
-
 // 정적 생성 단계(Node)에서는 import.meta.client 가 false 라 리다이렉트하지 않고 빈 셸만 만든다.
 export default defineNuxtRouteMiddleware((to) => {
   if (!import.meta.client) return
-  if (!getToken() && to.path !== "/login") return navigateTo("/login", { replace: true })
+  const auth = useAuthStore()   // 부팅 시 plugins/auth-init.ts 가 세션 복원을 먼저 시도한다(§14)
+  if (!auth.isAuthenticated && to.path !== "/login") return navigateTo("/login", { replace: true })
 })
 ```
 
@@ -711,7 +786,11 @@ const isLoading = computed(() => healthStatus.value === "idle" || healthStatus.v
 | 키 | 용도 |
 |----|------|
 | `DATABASE_URL` | PostgreSQL 연결 (또는 `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME`) |
-| `SECRET_KEY` / `JWT_*` | 토큰 서명, 만료 |
+| `SECRET_KEY` | access JWT 서명 — **32자 이상 필수, 기본값이면 기동 거부**(§9). 스캐폴드가 랜덤 생성 |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | access JWT 만료(분). 기본 `15` |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | refresh 세션·쿠키 만료(일). 기본 `14` |
+| `COOKIE_SECURE` | refresh 쿠키 `Secure` 속성. 로컬 `false`, 운영(HTTPS) `true` — `true` 면 HSTS 도 켜진다(§9) |
+| `INITIAL_ADMIN_USERNAME` / `INITIAL_ADMIN_PASSWORD` | 초기 관리자 시드(§9). 스캐폴드가 랜덤 생성해 주입, 미설정이면 시드 스킵 |
 | `CORS_ORIGINS` | 콤마 구분 허용 출처 |
 | `FRONTEND_URL`, `BACKEND_PUBLIC_URL` | 리다이렉트/콜백 |
 | `OAUTH_*` | SSO(authorize/token/userinfo URL, client id/secret, redirect uri) |
@@ -810,9 +889,9 @@ gh pr merge --squash --delete-branch
 - [ ] PostgreSQL `connect_args` KST 고정 (§7, §10)
 - [ ] Alembic 초기화 + 초기 마이그레이션 (§11) — **DB는 항상 Alembic으로만 관리, `create_all`은 테스트 전용 (MUST §11)**
 - [ ] `pytest` + SQLite in-memory + `conftest.py` 픽스처 (§12)
-- [ ] 프론트 `app/` 골격(§13): `app/plugins/api.ts`의 `$fetch` 인스턴스(`$api`), `app/stores/auth.ts`(Pinia), `app/app.vue`
+- [ ] 프론트 `app/` 골격(§13): `app/plugins/api.ts`의 `$fetch` 인스턴스(`$api`), `app/plugins/auth-init.ts`(세션 복원), `app/stores/auth.ts`(Pinia), `app/app.vue`
 - [ ] SPA 고정: `nuxt.config.ts`의 `ssr: false` + `nuxt generate` 정적 산출물 (§2, §13)
-- [ ] `app/middleware/auth.ts` 가드 + 각 페이지 `definePageMeta({ middleware: 'auth' })` + SSO 로그인/콜백 흐름 (§14)
+- [ ] `app/middleware/auth.ts` 가드 + 각 페이지 `definePageMeta({ middleware: 'auth' })` + 로그인/refresh/로그아웃 흐름 (§9, §14)
 - [ ] Tailwind v4 `@theme`(`app/assets/css/main.css`), pnpm, ESLint + `nuxt typecheck` (§15, §2)
 - [ ] `.github/pull_request_template.md` 추가, `main` 보호 + CI 머지 게이트 (§20)
 - [ ] 첫 실패 테스트 작성(TDD Red) → 구현(Green) (§18)

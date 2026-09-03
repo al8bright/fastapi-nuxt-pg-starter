@@ -18,12 +18,13 @@ export function useMe() {
       authStore.setUser(user)
       return user
     },
-    // ssr: false 라 서버에서는 돌지 않는다. 토큰이 없으면 아예 요청하지 않는다.
+    // ssr: false 라 서버에서는 돌지 않는다. 토큰(메모리)이 없으면 아예 요청하지 않는다.
     { server: false, immediate: authStore.isAuthenticated },
   )
 }
 
-/** 로그인 → 토큰 저장 → 사용자 정보 로드 (쿼리 라이브러리의 mutation 대응) */
+/** 로그인 → access 토큰을 스토어(메모리)에 저장 → 사용자 정보 로드 (mutation 대응).
+ *  refresh 토큰은 서버가 HttpOnly 쿠키로 내려주므로 프론트는 저장하지 않는다. */
 export function useLogin() {
   const { getMe, login } = useAuthApi()
   const authStore = useAuthStore()
@@ -48,4 +49,23 @@ export function useLogin() {
   }
 
   return { mutate, isPending, isError }
+}
+
+/** 로그아웃 → 서버 세션 revoke + 쿠키 삭제(실패 무시) → 상태 초기화 → 로그인 화면 */
+export function useLogout() {
+  const { logout } = useAuthApi()
+  const authStore = useAuthStore()
+
+  async function mutate(): Promise<void> {
+    try {
+      await logout()
+    } catch {
+      // 서버 revoke 실패는 무시 — 로컬 상태는 어차피 비우고, 만료된 세션은 서버가 거부한다.
+    }
+    authStore.logout()
+    clearNuxtData("auth:me") // useMe 캐시도 비워 다음 로그인 때 재조회하게 한다.
+    await navigateTo("/login", { replace: true })
+  }
+
+  return { mutate }
 }

@@ -8,6 +8,8 @@
    TZ 에 의존하면 macOS 와 Windows 가 서로 다른 시각을 기록한다. 한국은 DST 가 없어
    고정 +09:00 으로 항상 정확하며, zoneinfo/tzdata 의존도 생기지 않는다.)
 """
+import hashlib
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -20,6 +22,9 @@ KST = timezone(timedelta(hours=9))
 # bcrypt 는 입력의 앞 72바이트만 사용한다. 초과분을 조용히 버리면 서로 다른 비밀번호가
 # 같은 해시로 검증되므로(UTF-8 한글은 3바이트/자 → 24자에서 도달) 명시적으로 거부한다.
 MAX_PASSWORD_BYTES = 72
+
+# 비밀번호 최소 길이 (NIST 800-63B 최소 권고 8자).
+MIN_PASSWORD_LENGTH = 8
 
 
 def now() -> datetime:
@@ -46,6 +51,34 @@ def verify_password(plain: str, hashed: str) -> bool:
         return bcrypt.checkpw(pw, hashed.encode("utf-8"))
     except (ValueError, TypeError):
         return False
+
+
+def validate_password_policy(plain: str) -> None:
+    """비밀번호 정책 검증. 위반 시 ValueError.
+
+    NIST 800-63B 방식 — 길이만 검증하고 조합 규칙(대소문자/숫자/특수문자 강제)은 두지 않는다.
+    조합 규칙은 예측 가능한 치환(P@ssw0rd!)만 유도해 실질 엔트로피를 높이지 못하고
+    사용성만 해친다는 것이 NIST 의 결론이다. 길이(최소 8자)가 가장 효과적인 단일 기준이다.
+    상한은 bcrypt 의 72바이트 제한(MAX_PASSWORD_BYTES)을 그대로 따른다.
+    """
+    if len(plain) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"비밀번호는 {MIN_PASSWORD_LENGTH}자 이상이어야 합니다.")
+    if len(plain.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise ValueError(f"비밀번호는 UTF-8 {MAX_PASSWORD_BYTES}바이트를 넘을 수 없습니다.")
+
+
+def generate_refresh_token() -> str:
+    """refresh 토큰 원문 생성 (CSPRNG, 48바이트 → url-safe 문자열)."""
+    return secrets.token_urlsafe(48)
+
+
+def hash_refresh_token(token: str) -> str:
+    """refresh 토큰의 sha256 hexdigest. DB 에는 원문 대신 이 해시만 저장한다.
+
+    토큰 자체가 고엔트로피 랜덤 값이므로 bcrypt 같은 느린 해시가 필요 없고,
+    결정적 해시라 인덱스 조회가 가능하다.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def create_token(

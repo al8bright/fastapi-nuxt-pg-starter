@@ -5,13 +5,10 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.security import hash_password, verify_password
+from app.config import Settings
+from app.core.security import hash_password, validate_password_policy, verify_password
 from app.models.user import User, UserRole
 from app.services.exceptions import ServiceError
-
-# 기본 관리자 (처음 실행 시 자동 생성). 운영에서는 즉시 비밀번호를 변경해야 한다.
-DEFAULT_ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = "admin123"
 
 
 def get_by_username(db: Session, username: str) -> User | None:
@@ -31,6 +28,10 @@ def create_user(
 ) -> User:
     if get_by_username(db, username) is not None:
         raise ServiceError("user_exists", "이미 존재하는 사용자입니다.")
+    try:
+        validate_password_policy(password)
+    except ValueError as e:
+        raise ServiceError("weak_password", str(e)) from e
     user = User(
         username=username,
         hashed_password=hash_password(password),
@@ -52,18 +53,24 @@ def authenticate(db: Session, username: str, password: str) -> User:
     return user
 
 
-def ensure_admin(db: Session) -> None:
-    """관리자 계정이 하나도 없으면 기본 관리자(admin/admin123)를 생성한다 (idempotent)."""
+def ensure_admin(db: Session, settings: Settings) -> None:
+    """관리자 계정이 하나도 없으면 settings 의 초기 관리자를 생성한다 (idempotent).
+
+    initial_admin_password 가 None 이면 아무것도 만들지 않는다 (호출부에서 경고 로그).
+    스캐폴드가 .env 에 랜덤 비밀번호를 생성해 주며, 운영에서는 로그인 후 변경을 권고한다.
+    """
+    if settings.initial_admin_password is None:
+        return
     has_admin = db.execute(
         select(User.id).where(User.role == UserRole.ADMIN.value).limit(1)
     ).first()
     if has_admin is not None:
         return
-    if get_by_username(db, DEFAULT_ADMIN_USERNAME) is not None:
+    if get_by_username(db, settings.initial_admin_username) is not None:
         return
     create_user(
         db,
-        username=DEFAULT_ADMIN_USERNAME,
-        password=DEFAULT_ADMIN_PASSWORD,
+        username=settings.initial_admin_username,
+        password=settings.initial_admin_password,
         role=UserRole.ADMIN,
     )

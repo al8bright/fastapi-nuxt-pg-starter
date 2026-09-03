@@ -19,7 +19,7 @@
 - **API는 `/api/v1`**, 설정은 `get_settings()`+`@lru_cache`, 공통 의존성은 `app/dependencies.py`
 - **계층 분리** — 라우터는 얇게(HTTP만), 도메인 로직은 `services/`, 검증은 `schemas/`
 - **프론트**: $fetch(ofetch) + Nuxt useAsyncData/useFetch + Pinia, 패키지 매니저는 **pnpm**(npm 금지)
-- **인증**: Bearer JWT
+- **인증**: access JWT(메모리, 15분) + refresh HttpOnly 쿠키(DB `sessions`, 회전) — ⛔ 토큰 `localStorage` 저장 금지(§9, §14)
 - **변경은 브랜치 → PR → CI 통과 → 머지** — `main` 직접 푸시 금지, 1 PR은 Structural·Behavioral 중 하나만
 
 ## 작업 방식

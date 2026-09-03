@@ -13,7 +13,8 @@ description: __PROJECT_NAME__ 프론트엔드에 기능·페이지·API 호출�
 
 1. **API 함수** `frontend/app/api/<domain>.ts`
    - 공용 fetch 인스턴스는 `app/plugins/api.ts` 가 `$fetch.create()` 로 만들어 **`$api`** 로 provide 한다.
-     baseURL·Bearer 토큰 주입·401 처리는 전부 인스턴스가 담당하므로 도메인 모듈은 **경로와 타입만** 신경 쓴다.
+     baseURL·`credentials: "include"`·access 토큰 Bearer 주입·401 시 refresh 재시도는 전부 인스턴스가 담당하므로
+     도메인 모듈은 **경로와 타입만** 신경 쓴다.
    - `useNuxtApp()` 을 써야 하므로 이 모듈은 **컴포저블 형태(`use...Api()`)** 로 노출한다.
    ```ts
    // app/api/events.ts
@@ -152,33 +153,28 @@ description: __PROJECT_NAME__ 프론트엔드에 기능·페이지·API 호출�
      ⛔ `<a href>` 로 내부 링크를 걸면 전체 새로고침이 된다.
    - 공통 레이아웃은 `app/app.vue`(`<NuxtLayout><NuxtPage /></NuxtLayout>`) 와 `app/layouts/` 로 구성한다.
 
-6. **인증/토큰 (§14)**
-   - 토큰은 `localStorage` 키 **`__PROJECT_SNAKE___token`**. 충돌 방지용 프로젝트 접두. 접근은 `app/lib/token.ts` 로만.
-   - ⚠️ `token.ts` 의 접근 함수에는 **`import.meta.client` 가드 필수** — `nuxt generate` 의 정적 생성 단계는 Node 에서 돌아 `localStorage` 가 없다.
-     `app/middleware/auth.ts` 도 같은 이유로 **클라이언트일 때만** 리다이렉트한다.
-   ```ts
-   // app/lib/token.ts
-   const TOKEN_KEY = "__PROJECT_SNAKE___token"
-
-   export function getToken(): string | null {
-     if (!import.meta.client) return null
-     return localStorage.getItem(TOKEN_KEY)
-   }
-   ```
+6. **인증/토큰 (§9·§14)**
+   - **access 토큰은 Pinia `auth` 스토어의 메모리에만** 있다. ⛔ **`localStorage` 에 토큰을 저장하지 마라** —
+     XSS 로 통째로 털리는 저장소다(옛 `app/lib/token.ts` 방식은 폐지됐다).
+   - **refresh 토큰은 HttpOnly 쿠키**(`refresh_token`, `Path=/api/v1/auth`)라 JS 에서 보이지 않는다.
+     `$api` 가 `credentials: "include"` 라 브라우저가 알아서 실어 보낸다 — 프론트 코드가 만질 일이 없다.
+   - **새로고침 대응**: 메모리 토큰은 새로고침에 날아간다 → `app/plugins/auth-init.ts` 가 부팅 시
+     `POST /auth/refresh` 로 세션을 복원한다. 새 기능에서 따로 복원 로직을 만들지 마라.
    ```ts
    // app/middleware/auth.ts
-   import { getToken } from "~/lib/token"
-
    export default defineNuxtRouteMiddleware((to) => {
      if (!import.meta.client) return
-     if (!getToken() && to.path !== "/login") return navigateTo("/login", { replace: true })
+     const auth = useAuthStore()
+     if (!auth.isAuthenticated && to.path !== "/login") return navigateTo("/login", { replace: true })
    })
    ```
-   - **401 은 `app/plugins/api.ts` 의 `onResponseError` 가 일괄 처리**한다(토큰 제거 + `/login` 이동).
-     ⛔ 개별 API 함수·컴포넌트에서 401 을 따로 처리하지 마라.
+   - ⚠️ 미들웨어는 **클라이언트일 때만** 리다이렉트한다 — `nuxt generate` 의 정적 생성 단계는 Node 에서 돌아 인증 상태가 없다.
+   - **401 은 `app/plugins/api.ts` 가 일괄 처리**한다 — **refresh 1회(single-flight) 후 원 요청 재시도**, 실패 시
+     세션 제거 + `/login` 이동. ⛔ 개별 API 함수·컴포넌트에서 401 이나 refresh 를 따로 처리하지 마라.
    - Bearer 주입도 마찬가지로 `onRequest` 인터셉터가 담당한다 — 호출부에서 헤더를 직접 붙이지 않는다.
-   - 로그인 성공 시에는 Pinia `auth` 스토어의 **`setSession(token)` 하나만** 부른다 — 그 안에서 `setToken()`(localStorage)과
-     전역 상태를 함께 갱신한다. 이어서 `setUser(await getMe())` 로 사용자 정보를 채운다.
+   - 로그인 성공 시에는 Pinia `auth` 스토어의 **`setSession(accessToken)` 하나만** 부른다 — 메모리 상태를 갱신한다
+     (refresh 쿠키는 응답 `Set-Cookie` 로 자동 저장). 이어서 `setUser(await getMe())` 로 사용자 정보를 채운다.
+   - 로그아웃은 `POST /auth/logout`(서버가 세션 revoke + 쿠키 삭제) 후 `auth.clearSession()`.
 
 ## 스타일 (§15)
 - Tailwind v4 CSS-first(`@import "tailwindcss"` + `@theme`, `app/assets/css/main.css`). 별도 `tailwind.config.js` 지양.

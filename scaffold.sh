@@ -287,9 +287,14 @@ if [ $SKIP_DB -eq 0 ]; then
   fi
 fi
 DATABASE_URL="postgresql+psycopg2://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+# SECRET_KEY 는 32자 미만이면 백엔드 Settings 검증이 기동을 거부한다 — 약한 폴백을 두지 않고
+# CSPRNG 이 없으면 여기서 중단한다 (python3 은 어차피 백엔드 실행에 필수다).
 if command -v openssl >/dev/null 2>&1; then SECRET=$(openssl rand -hex 24)
 elif command -v python3 >/dev/null 2>&1; then SECRET=$(python3 -c 'import secrets;print(secrets.token_hex(24))')
-else SECRET="change-me-$(date +%s)"; fi
+else warn "SECRET_KEY 생성에 openssl 또는 python3 이 필요합니다."; exit 1; fi
+# 초기 관리자 비밀번호 (CSPRNG 12바이트 hex — 로그인 후 변경 권고)
+if command -v openssl >/dev/null 2>&1; then ADMIN_PASSWORD=$(openssl rand -hex 12)
+else ADMIN_PASSWORD=$(python3 -c 'import secrets;print(secrets.token_hex(12))'); fi
 
 # ---------- 2. 복사 ----------
 step "골격 복사 → $TARGET"
@@ -326,14 +331,18 @@ step ".env 생성 (OS 무관 주입 — architecture.md §5)"
 cat > "$TARGET/backend/.env" <<EOF
 DATABASE_URL=$DATABASE_URL
 SECRET_KEY=$SECRET
-ACCESS_TOKEN_EXPIRE_MINUTES=30
+ACCESS_TOKEN_EXPIRE_MINUTES=15
+REFRESH_TOKEN_EXPIRE_DAYS=14
+COOKIE_SECURE=false
+INITIAL_ADMIN_USERNAME=admin
+INITIAL_ADMIN_PASSWORD=$ADMIN_PASSWORD
 CORS_ORIGINS=http://localhost:5173
 FRONTEND_URL=http://localhost:5173
 BACKEND_PUBLIC_URL=http://localhost:8000
 TZ=Asia/Seoul
 EOF
 printf 'NUXT_PUBLIC_API_BASE_URL=\nNUXT_PUBLIC_BACKEND_URL=http://localhost:8000\n' > "$TARGET/frontend/.env"
-ok "backend/.env, frontend/.env 생성 (DATABASE_URL, SECRET_KEY 주입)"
+ok "backend/.env, frontend/.env 생성 (DATABASE_URL, SECRET_KEY, 초기 관리자 비밀번호 주입)"
 
 BACKEND="$TARGET/backend"
 FRONTEND="$TARGET/frontend"
@@ -397,6 +406,11 @@ cat <<EOF
 
 [확인]    브라우저: http://localhost:5173
           → '백엔드 API'와 '데이터베이스'가 모두 '정상'이면 성공입니다.
+
+[관리자]  초기 관리자 계정 (backend/.env 의 INITIAL_ADMIN_* 에 저장됨):
+  아이디: admin
+  비밀번호: $ADMIN_PASSWORD
+  → 첫 로그인 후 반드시 비밀번호를 변경하세요.
 
 [DB 변경] 모델 수정 시 (architecture.md §11):
   cd "$BACKEND"

@@ -93,10 +93,13 @@ pnpm dev
 
 스캐폴드에는 자체 계정(username/password) 로그인 플로우가 내장돼 있다:
 
-- 처음 백엔드를 실행하면 기본 관리자 **`admin` / `admin123`** 이 자동 생성된다(없을 때만, lifespan 시드).
+- 초기 관리자는 **`backend/.env` 의 `INITIAL_ADMIN_USERNAME` / `INITIAL_ADMIN_PASSWORD`** 로 시드된다(없을 때만, lifespan 시드).
+  스캐폴드가 비밀번호를 **랜덤 생성해 `backend/.env` 에 기록**하므로 거기서 확인한다. 미설정이면 시드를 건너뛴다.
+  하드코딩 기본 계정(admin/admin123 류)은 없다.
+- 로그인하면 **access JWT(15분, 메모리)** 와 **refresh HttpOnly 쿠키(DB `sessions`, 회전)** 가 발급된다 — 상세는 `docs/architecture.md` §9·§14.
 - 흐름: **미인증 → `/login`** → 로그인 성공 → **메인(`/`)** → 랜딩(`/landing`, 시스템 상태) / **My(`/my`, 내 정보·로그아웃)**.
 - `users` 테이블은 `role`(일반 `user` / 관리자 `admin`)로 권한을 구분한다. 관리자 전용 API 는 `require_admin` 의존성으로 보호한다.
-- ⚠️ 운영 배포 시 기본 관리자 비밀번호를 **즉시 변경**하라.
+- ⚠️ 로그인 브루트포스 방어(429)는 **인메모리 카운터(단일 프로세스 전제)** 다 — 다중 워커 배포는 Redis 등으로 교체한다(§9).
 
 ## DB 스키마 변경 (architecture.md §11)
 

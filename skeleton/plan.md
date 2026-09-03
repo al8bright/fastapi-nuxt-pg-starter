@@ -11,7 +11,7 @@
 - [ ] PostgreSQL `connect_args` KST 고정
 - [ ] Alembic 초기화 + 초기 마이그레이션
 - [ ] `pytest` + SQLite in-memory + `conftest.py` 픽스처
-- [ ] Nuxt 골격: `$api` 플러그인(`app/plugins/api.ts`), Pinia 인증 스토어(`app/stores/auth.ts`), `useAsyncData` 기반 컴포저블(`app/composables/`)
+- [ ] Nuxt 골격: `$api` 플러그인(`app/plugins/api.ts`), 세션 복원 플러그인(`app/plugins/auth-init.ts`), Pinia 인증 스토어(`app/stores/auth.ts`, access 토큰 메모리 전용), `useAsyncData` 기반 컴포저블(`app/composables/`)
 - [ ] `app/middleware/auth.ts` 인증 가드 + `definePageMeta`
 - [ ] Nuxt SPA 설정(`ssr: false`, `devServer.port` 5173, `nitro.devProxy`)
 - [ ] Tailwind v4 `@theme`, pnpm, ESLint + nuxt typecheck

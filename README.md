@@ -41,8 +41,9 @@ mindmap
       $fetch ofetch
       Tailwind CSS v4
     기본 내장 기능
-      JWT 로그인
-      관리자 계정 자동 시드
+      access JWT + refresh 쿠키 로그인
+      세션 회전·재사용 감지
+      초기 관리자 .env 시드
       보호 라우트 가드
       백엔드·DB 상태 화면
     자동화
@@ -100,14 +101,15 @@ sequenceDiagram
     participant D as PostgreSQL
 
     U->>F: 루트 경로 접속
-    F->>F: auth 미들웨어가 토큰 확인
-    F-->>U: 토큰 없음 → 로그인 화면
+    F->>A: POST /api/v1/auth/refresh — auth-init 플러그인, 쿠키 자동 전송
+    A-->>F: 쿠키 없음 → 401
+    F-->>U: 미인증 → 로그인 화면
     U->>F: 아이디·비밀번호 입력
     F->>A: POST /api/v1/auth/login
-    A->>D: 사용자 조회 + bcrypt 검증
+    A->>D: 사용자 조회 + bcrypt 검증 + sessions 세션 생성
     D-->>A: user
-    A-->>F: access_token
-    F->>F: localStorage 저장 후 메인으로 이동
+    A-->>F: access_token 바디 + refresh_token HttpOnly 쿠키
+    F->>F: access 토큰을 Pinia 메모리에 두고 메인으로 이동
     F->>A: GET /api/v1/auth/me
     A-->>F: 사용자 정보
     U->>F: 시스템 상태 화면 열기
@@ -131,7 +133,7 @@ flowchart LR
       RR --> SC["schemas/ Pydantic 검증"]
       SV --> MD["models/ SQLAlchemy"]
     end
-    API -->|"Bearer JWT · /api/v1"| RR
+    API -->|"Bearer access JWT + refresh 쿠키 · /api/v1"| RR
     MD --> DB[("PostgreSQL")]
     AL["alembic/ 마이그레이션"] --> DB
 ```
@@ -188,7 +190,7 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
 2. 이름/위치 입력 → `PascalCase`를 `snake_case`(DB명·토큰키)로 변환
 3. **DESIGN.md 적용 여부 질문** → 적용 시 `colors`/`typography`를 Tailwind `@theme`로 변환해 `frontend/app/assets/css/main.css`에 주입(+`docs/DESIGN.md` 복사)
 4. `skeleton/` 복사 + 토큰 치환(`__PROJECT_NAME__`, `__PROJECT_SNAKE__`, 테마) + 런타임 핀 파일 이관
-5. **PostgreSQL 접속정보(host/port/user/password/db) 질문** → `backend/.env`·`frontend/.env` 생성(`DATABASE_URL`·`SECRET_KEY` 주입)
+5. **PostgreSQL 접속정보(host/port/user/password/db) 질문** → `backend/.env`·`frontend/.env` 생성(`DATABASE_URL`·`SECRET_KEY`(랜덤)·`INITIAL_ADMIN_USERNAME`/`INITIAL_ADMIN_PASSWORD`(랜덤 생성 후 출력) 주입)
 6. 백엔드: `python -m venv .venv` + `pip install -r requirements.txt`
 7. **psql 로 DB 생성** → **Alembic `upgrade head` 로 테이블 생성**(DB는 항상 Alembic으로 관리 §11)
 8. 프론트: `pnpm install`
@@ -235,7 +237,7 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
   생성물에 `__PROJECT_NAME__` · `__PROJECT_SNAKE__` · `__THEME_CSS__` 잔재 없음
   (`.vue` 포함, 토큰을 담은 골격 파일의 확장자는 모두 치환 대상에 포함된다)
 - 토큰 치환: `nuxt.config.ts` 의 `app.head.title`, `package.json` `name`(`my_project-frontend`),
-  `token.ts` `TOKEN_KEY`(`my_project_token`), `main.py` FastAPI `title`(`MyProject API`) 모두 정상
+  `main.py` FastAPI `title`(`MyProject API`) 모두 정상
 - `.env` 생성: `backend/.env` 에 `DATABASE_URL`·`SECRET_KEY` 주입,
   `frontend/.env` 는 `NUXT_PUBLIC_API_BASE_URL=` (빈 값 → devProxy 사용) + `NUXT_PUBLIC_BACKEND_URL=http://localhost:8000`
 - 테마: `--no-design` 은 기본 `@theme`, `--design` 은 DESIGN.md 의 색상(`--color-primary: #00478d` 등)이
@@ -250,7 +252,7 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
   (`ssr: false` 이므로 HTML 은 빈 셸이고 렌더링은 브라우저에서 한다)
 - 구동: SQLite 로 `uvicorn app.main:app` 기동 후
   `GET /api/v1/health` → `{"status":"ok"}`, `GET /api/v1/health/db` → `{"db":"ok","table":"app_meta","rows":0}`,
-  기본 관리자 시드(`admin`/`admin123`) 로그인 → access token 발급 → `GET /api/v1/auth/me` 200,
+  초기 관리자 시드 계정 로그인 → access token 발급 → `GET /api/v1/auth/me` 200,
   토큰 없음/잘못된 토큰/비밀번호 오류는 모두 401
 - 프론트 dev 서버: `/login` 이 `<title>MyProject</title>` 를 가진 SPA HTML 셸을 반환하고
   `runtimeConfig.public` 이 `.env` 값대로 주입됨. `/api/v1/*` 요청은 nitro devProxy 로 백엔드에 전달되어
@@ -258,11 +260,14 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
 - 브라우저(Chrome) 실제 렌더링: 4개 화면 확인 — `/login` 로그인 → 메인(`/`) 에 사용자명 표시 →
   `/landing` 의 백엔드·데이터베이스 배지 모두 "정상" → `/my` 의 아이디·권한 표시.
   DESIGN.md 테마가 실제 화면에 적용되고 콘솔 에러 없음
-- 인증 가드: 로그아웃 시 `localStorage` 토큰이 지워지고, 보호 라우트(`/my`) 재진입 시
-  `auth` 미들웨어가 `/login` 으로 리다이렉트함
+- 인증 가드: 로그아웃 시 세션이 폐기되고(메모리 access 토큰 제거 + 서버 refresh 세션 revoke),
+  보호 라우트(`/my`) 재진입 시 `auth` 미들웨어가 `/login` 으로 리다이렉트함
 
 **미검증**
 
+- 인증 재설계 반영분: 위 검증은 인증 재설계(불투명 refresh 토큰 + HttpOnly 쿠키 + `sessions` 회전,
+  `skeleton/docs/architecture.md` §9) **이전** 골격으로 수행했다. refresh 회전·재사용 감지·429 rate limit·
+  초기 관리자 `.env` 시드는 재설계 이후 아직 재검증하지 않았다.
 - PostgreSQL 경로: `--skip-db` 로 검증했으므로 `psql` DB 생성 + PostgreSQL 상대 `alembic upgrade head` 는
   확인하지 못했다. 마이그레이션은 SQLite 로만 검증했다.
 - `scaffold.ps1`(Windows/PowerShell): 실행 환경이 없어 검증하지 못했다. bash 판과 동일한

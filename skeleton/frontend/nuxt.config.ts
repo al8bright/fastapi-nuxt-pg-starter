@@ -1,7 +1,8 @@
 import tailwindcss from "@tailwindcss/vite"
 
 // Nuxt 설정 (architecture.md §13).
-// SPA 모드: 백엔드가 별도 FastAPI 서버이고 JWT 를 localStorage 에 두므로 SSR 을 쓰지 않는다.
+// SPA 모드: 백엔드가 별도 FastAPI 서버이고 access 토큰은 메모리, refresh 토큰은
+// HttpOnly 쿠키(DB 세션)로 관리하므로 SSR 없이 SPA 로 충분하다.
 // ssr: false + nuxt generate → 빈 셸(index.html) + SPA fallback(200.html) 만 미리 만들고 렌더링은 전부 브라우저에서 한다.
 // https://nuxt.com/docs/api/nuxt-config
 export default defineNuxtConfig({
@@ -43,6 +44,8 @@ export default defineNuxtConfig({
   devServer: { port: 5173, host: "0.0.0.0" },
 
   // dev 프록시: /api → FastAPI. 운영에서는 NUXT_PUBLIC_API_BASE_URL 로 절대 URL 을 준다.
+  // dev 는 프록시 덕에 refresh 쿠키가 same-origin 으로 동작한다. 운영에서 다른 오리진을 줄 경우
+  // 쿠키(SameSite=Lax)가 전송되려면 same-site(같은 사이트의 서브도메인) 배포가 전제다.
   nitro: {
     devProxy: {
       "/api": { target: "http://localhost:8000/api", changeOrigin: true },

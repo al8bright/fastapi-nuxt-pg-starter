@@ -2,15 +2,12 @@
 // My 화면 (architecture.md §14). 로그인 사용자 정보 + 로그아웃.
 definePageMeta({ middleware: "auth" })
 
-const authStore = useAuthStore()
 const { data: me, status: meStatus } = useMe()
+const logoutMutation = useLogout()
 
 const isPending = computed(() => meStatus.value === "idle" || meStatus.value === "pending")
 
-const onLogout = async () => {
-  authStore.logout()
-  await navigateTo("/login", { replace: true })
-}
+const onLogout = () => logoutMutation.mutate()
 </script>
 
 <template>

@@ -55,9 +55,10 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
   Vite 식으로 `target: "http://localhost:8000"` 이라고 쓰면 경로가 깨진다.
 - ⛔ **서버 전용 기능 금지** — `server/` 라우트(`server/api/*`), 서버 미들웨어, `useRequestEvent`, `defineEventHandler`,
   런타임 `runtimeConfig`(비공개 키). 정적 빌드라 **실행될 서버가 없어 동작하지 않는다.** 백엔드는 별도 FastAPI 서버다.
-- ⚠️ **정적 생성 단계는 Node 에서 돈다** → `localStorage`/`window` 를 직접 만지면 빌드가 깨진다.
-  `app/lib/token.ts` 의 `getToken`/`setToken`/`clearToken` 전부에 **`import.meta.client` 가드 필수**,
+- ⚠️ **정적 생성 단계는 Node 에서 돈다** → `localStorage`/`window` 같은 브라우저 API 를 직접 만지면 빌드가 깨진다.
+  접근에는 **`import.meta.client` 가드 필수**,
   `app/middleware/auth.ts` 도 맨 앞에 `if (!import.meta.client) return` 을 둬 생성 단계에서는 통과시킨다.
+  (인증 토큰은 애초에 `localStorage` 에 두지 않는다 — access 는 Pinia 메모리, refresh 는 HttpOnly 쿠키. architecture.md §9·§14)
 - 환경변수 접두는 **`NUXT_PUBLIC_`**(⛔ `VITE_` 아님). 코드에서는 `useRuntimeConfig().public.*` 로 읽고,
   기본값은 `nuxt.config.ts` 의 `runtimeConfig.public` 에 둔다. ⛔ `import.meta.env` 직접 참조 금지.
   - ⚠️ 매핑 규칙은 **camelCase ↔ SCREAMING_SNAKE 자동 변환**이다(`public.apiBaseUrl` ↔ `NUXT_PUBLIC_API_BASE_URL`) → 키 이름을 마음대로 못 짓는다.
@@ -90,10 +91,12 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 - Nuxt 전역 **`$fetch`(ofetch)** 가 HTTP 클라이언트다. 공용 인스턴스는 `app/plugins/api.ts` 에서
   **`$fetch.create({ baseURL, onRequest, onResponseError })`** 로 만들어 **`$api`** 로 provide 하고, 호출부는 `useNuxtApp().$api` 를 쓴다.
   - `provide` 만으로 **`$api` 타입이 자동 생성**된다 → ⛔ `declare module` augmentation 을 따로 쓰지 마라.
-  - `onRequest` — Bearer 토큰 주입. ⚠️ **`options.headers` 는 `Headers` 인스턴스**다 →
+  - 인스턴스에 **`credentials: "include"`** — refresh HttpOnly 쿠키(`Path=/api/v1/auth`)를 브라우저가 실어 보낸다.
+  - `onRequest` — **Pinia 메모리의 access 토큰** Bearer 주입. ⚠️ **`options.headers` 는 `Headers` 인스턴스**다 →
     **`options.headers.set("Authorization", ...)`**. axios 식 `config.headers.X = ...` 대입은 타입도 런타임도 틀린다.
-  - `onResponseError` — **401 일괄 처리**(토큰 제거 + `/login` 이동). ofetch 가 4xx 를 throw 하므로 `onResponse` 가 아니라 여기다.
-    `location.href` 앞에는 **`import.meta.client` 가드 필수**. ⛔ 개별 API·컴포넌트에서 401 을 따로 처리하지 마라.
+  - `onResponseError` — **401 일괄 처리**: refresh 1회(**single-flight** — 동시 401 은 하나의 refresh 로 합류) 후
+    원 요청 재시도, 실패 시 세션 제거 + `/login` 이동. ofetch 가 4xx 를 throw 하므로 `onResponse` 가 아니라 여기다.
+    `location.href` 앞에는 **`import.meta.client` 가드 필수**. ⛔ 개별 API·컴포넌트에서 401/refresh 를 따로 처리하지 마라.
 - ⚠️ **`app/api/*` 는 auto-import 대상이 아니다**(Nuxt 는 `composables/`·`utils/` 만 스캔) →
   `import { useAuthApi } from "~/api/auth"` 로 명시 import. 반대로 `app/composables/*`·`app/stores/*` 는 auto-import 된다.
 - ⛔ **axios 예제 복붙 금지.** 다른 점:
@@ -147,7 +150,13 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 - v2 API(`model_config`, `@field_validator`, `SettingsConfigDict`). ⛔ v1 패턴(`class Config`, `@validator`) 금지.
 
 ### 인증 / 린트·CI
-- 자체 계정 비밀번호는 **bcrypt** 해시(`core/security` 의 `hash_password`/`verify_password`). JWT `sub` = user id.
+- 자체 계정 비밀번호는 **bcrypt** 해시(`core/security` 의 `hash_password`/`verify_password`).
+  ⚠️ bcrypt 는 **72바이트 초과분을 무시**한다 → 비밀번호 정책이 UTF-8 72바이트 이하를 강제한다(architecture.md §9).
+- access 는 JWT(HS256, `sub` = user id, 15분) — **refresh 는 JWT 가 아니라 불투명 토큰**이다
+  (`secrets.token_urlsafe(48)`, DB `sessions` 에 SHA-256 해시만, 회전 + 재사용 감지). 상세는 architecture.md §9.
+- `SECRET_KEY` 는 32자 미만·기본값이면 `Settings` 검증이 기동을 거부한다. 초기 관리자는 `.env` 의
+  `INITIAL_ADMIN_USERNAME`/`INITIAL_ADMIN_PASSWORD` 로 시드(미설정 시 스킵) — 하드코딩 기본 계정 없음.
+- 로그인 429 rate limit 은 **인메모리(단일 프로세스 전제)** — 다중 워커 배포는 Redis 필요.
 - 백엔드 린트는 **ruff**(`backend/pyproject.toml`): FastAPI `Depends` 등은 **B008 예외**(`extend-immutable-calls`), `alembic/` 제외, line-length 120. 새 의존성으로 lint 가 깨지면 이 설정을 먼저 본다.
 - 프론트 린트는 **eslint + @nuxt/eslint**(`frontend/eslint.config.mjs`, flat config).
 - **CI**(`.github/workflows/ci.yml`)가 push·PR(main) 마다 backend(ruff+pytest) / frontend(**eslint + typecheck + build**) 를 실행. 워크플로는 생성 프로젝트(루트)에서만 동작한다.

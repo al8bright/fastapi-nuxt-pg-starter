@@ -303,6 +303,11 @@ $_secBytes = [byte[]]::new(24)
 $_rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 try { $_rng.GetBytes($_secBytes) } finally { $_rng.Dispose() }
 $secret = -join ($_secBytes | ForEach-Object { $_.ToString('x2') })
+# 초기 관리자 비밀번호도 같은 CSPRNG 방식으로 생성한다 (12바이트 hex — 로그인 후 변경 권고).
+$_admBytes = [byte[]]::new(12)
+$_rng2 = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $_rng2.GetBytes($_admBytes) } finally { $_rng2.Dispose() }
+$adminPassword = -join ($_admBytes | ForEach-Object { $_.ToString('x2') })
 
 # ---------- 2. 골격 복사 ----------
 Write-Step "골격 복사 → $Target"
@@ -349,7 +354,11 @@ Write-Step ".env 생성 (OS 무관 주입 — architecture.md §5)"
 $backendEnv = @"
 DATABASE_URL=$databaseUrl
 SECRET_KEY=$secret
-ACCESS_TOKEN_EXPIRE_MINUTES=30
+ACCESS_TOKEN_EXPIRE_MINUTES=15
+REFRESH_TOKEN_EXPIRE_DAYS=14
+COOKIE_SECURE=false
+INITIAL_ADMIN_USERNAME=admin
+INITIAL_ADMIN_PASSWORD=$adminPassword
 CORS_ORIGINS=http://localhost:5173
 FRONTEND_URL=http://localhost:5173
 BACKEND_PUBLIC_URL=http://localhost:8000
@@ -358,7 +367,7 @@ TZ=Asia/Seoul
 [System.IO.File]::WriteAllText((Join-Path $Target 'backend\.env'), $backendEnv, $Enc)
 $frontendEnv = "NUXT_PUBLIC_API_BASE_URL=`nNUXT_PUBLIC_BACKEND_URL=http://localhost:8000`n"
 [System.IO.File]::WriteAllText((Join-Path $Target 'frontend\.env'), $frontendEnv, $Enc)
-Write-Ok "backend\.env, frontend\.env 생성 (DATABASE_URL, SECRET_KEY 주입)"
+Write-Ok "backend\.env, frontend\.env 생성 (DATABASE_URL, SECRET_KEY, 초기 관리자 비밀번호 주입)"
 
 $backend  = Join-Path $Target 'backend'
 $frontend = Join-Path $Target 'frontend'
@@ -447,6 +456,11 @@ Write-Host @"
 
 [확인]    브라우저: http://localhost:5173
           → '백엔드 API'와 '데이터베이스'가 모두 '정상'이면 성공입니다.
+
+[관리자]  초기 관리자 계정 (backend\.env 의 INITIAL_ADMIN_* 에 저장됨):
+  아이디: admin
+  비밀번호: $adminPassword
+  → 첫 로그인 후 반드시 비밀번호를 변경하세요.
 
 [DB 변경] 모델 수정 시 (architecture.md §11):
   cd "$backend"
