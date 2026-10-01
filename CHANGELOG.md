@@ -5,6 +5,36 @@
 
 ---
 
+## 2026-10-02
+
+의존성 전체를 최신 안정 버전으로 상향했다. 런타임 최소(Python ≥ 3.13 · Node ≥ 24 · pnpm ≥ 11)와 `.python-version`·`.nvmrc`·`scripts/versions.env` 는 그대로다.
+
+### Changed (변경)
+
+- **백엔드 핀**(`requirements.txt`) — FastAPI 0.137.2 → 0.142.2, Uvicorn 0.49.0 → 0.54.0, SQLAlchemy 2.0.51 → 2.1.1, Alembic 1.18.5 → 1.20.0, psycopg2-binary 2.9.12 → 2.9.13, Pydantic 2.13.4 → 2.13.5, pydantic-settings 2.14.2 → 2.15.0, PyJWT 2.13.0 → 2.15.1, bcrypt 4.3.0 → 5.0.0, httpx2 2.5.0 → 2.13.1, ruff 0.14.0 → 0.16.9. python-multipart 0.0.32 · pytest 9.1.1 은 이미 최신이다.
+- **프론트 범위**(`package.json`) — @pinia/nuxt ^1.0.2, pinia ^4.0.3, vue ^3.5.43, vue-router ^5.3.1, eslint ^10.11.0, vue-tsc ^3.3.11, @types/node ^24.19.0, `packageManager` pnpm@11.28.3. nuxt 4.5.2 · @nuxt/eslint 1.17.0 · tailwindcss/@tailwindcss/vite 4.3.3 은 이미 최신이다. TypeScript 는 vue-tsc 의 TS 7 호환이 확인되지 않아 `~6.0.3` 을 유지한다.
+- **`UserRole`** 을 `class UserRole(str, enum.Enum)` 에서 `enum.StrEnum` 으로 바꿨다. ruff 0.16 의 `UP042` 대응이며, 사용처가 모두 `.value` 를 쓰므로 동작은 같다.
+- **`alembic.ini`** 에 `path_separator = os` 를 추가했다. Alembic 1.20 은 이 키가 없으면 `prepend_sys_path` 레거시 분리 방식에 대한 DeprecationWarning 을 낸다.
+- **문서** — `README.md` 버전 표·기준일, `architecture.md` §2 스택 표기(FastAPI 0.142 · SQLAlchemy 2.1), `CLAUDE.md`, `stack-versions` 스킬의 스냅샷과 버전별 주의(SQLAlchemy 2.1/Alembic 1.20, bcrypt 5, ruff 0.16, 검증 절차)를 갱신했다.
+
+### Added (추가)
+
+- **72바이트 초과 비밀번호 회귀 테스트** — bcrypt 5 부터 `hashpw`/`checkpw` 가 72바이트 초과 입력에 `ValueError` 를 던진다. 기존 가드(로그인 스키마 422, `validate_password_policy`, `verify_password` 의 `False` 반환)가 500 을 막는지 확인하는 테스트 4건을 추가했다(로그인 422, 계정 생성 `weak_password`, `hash_password` 거부, `verify_password` False).
+
+### 검증
+
+- `skeleton/` 복사 + 토큰 치환으로 만든 임시 프로젝트(Windows, Python 3.13.12 / Node 24.14.0 / pnpm 11.28.3)에서 수행했다. `scaffold.ps1`·`scaffold.sh` 는 이 환경에서 런타임 사전 점검·bootstrap 단계에서 중단되어 사용하지 못했다.
+- 백엔드: `ruff check .` 통과, `pytest -q` 31건 통과(`-W error::DeprecationWarning` 에서도 통과).
+- PostgreSQL 16(docker): `alembic upgrade head` · `downgrade base` 왕복 · `alembic check`("No new upgrade operations detected") 통과. 관리자 로그인·`/auth/me`·`/auth/refresh` 200, 72바이트 초과 비밀번호 로그인 422.
+- 프론트: `pnpm install` · `pnpm lint` · `pnpm typecheck` · `pnpm build` · `pnpm generate` 모두 exit 0. install 후 `package.json`·`pnpm-workspace.yaml` 변경 없음(빌드 스크립트 허용 대상은 기존 `esbuild`·`unrs-resolver` 그대로).
+
+### 남은 후속 (미진행)
+
+- `pnpm install` 시 nuxt CLI 의 전이 의존성 `@bomb.sh/tab` 이 `cac@^6` 을 peer 로 요구하나 `cac@7` 이 설치되어 peer 경고가 1건 남는다. 업스트림 사안이며 lint·typecheck·build 에는 영향이 없다.
+- Windows PowerShell 5.1 에서 `scaffold.ps1` 이 `bootstrap.ps1` 파싱 오류(BOM 없는 UTF-8 파일의 한글 해석 문제로 추정)로 중단된다. 별도 수정이 필요하다.
+
+---
+
 ## 2026-10-02 — 기본 문서 세트 정리 (AGENTS.md 도입, 문서 루트 배치)
 
 생성 프로젝트의 기준 문서 6종을 골격 루트에 두고, `docs/` 는 프로젝트 고유 문서(PRD·유저 플로우·기획서 등) 전용으로 비웠다.

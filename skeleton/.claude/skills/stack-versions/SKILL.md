@@ -12,10 +12,10 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 
 > 아래 2·3은 참고용 스냅샷이다. **실제 값은 위 파일을 읽어서** 확인한다.
 
-## 2. 버전 스냅샷 (2026-08-11 기준)
+## 2. 버전 스냅샷 (2026-10-02 기준)
 - **런타임**: Python ≥ 3.13 · Node ≥ 24 · pnpm ≥ 11 (PostgreSQL 고정 없음, 14+ 권장)
-- **백엔드**: FastAPI 0.137.2 · SQLAlchemy 2.0.51 · Alembic 1.18.5 · Pydantic 2.13.4 / settings 2.14.2 · psycopg2-binary 2.9.12 · PyJWT 2.13.0 · bcrypt 4.3.0 · httpx2 2.5.0 · pytest 9.1.1 · ruff 0.14.0
-- **프론트**: nuxt `4.5` · vue `3.5` · vue-router `5.2` · pinia `4.0` · @pinia/nuxt `1.0` · tailwindcss `4.3` · @tailwindcss/vite `4.3` · @nuxt/eslint `1.17` · eslint `10.8` · typescript `6.0` · vue-tsc `3.3`
+- **백엔드**: FastAPI 0.142.2 · Uvicorn 0.54.0 · SQLAlchemy 2.1.1 · Alembic 1.20.0 · Pydantic 2.13.5 / settings 2.15.0 · psycopg2-binary 2.9.13 · PyJWT 2.15.1 · bcrypt 5.0.0 · httpx2 2.13.1 · pytest 9.1.1 · ruff 0.16.9
+- **프론트**: nuxt `4.5` · vue `3.5` · vue-router `5.3` · pinia `4.0` · @pinia/nuxt `1.0` · tailwindcss `4.3` · @tailwindcss/vite `4.3` · @nuxt/eslint `1.17` · eslint `10.11` · typescript `6.0` · vue-tsc `3.3` · @types/node `24` · pnpm `11.28`(packageManager)
   (⛔ HTTP 는 `$fetch`(ofetch, Nuxt 내장) — **axios 의존성 없음**. 서버 상태도 쿼리 라이브러리 없이 Nuxt 내장 `useAsyncData` 를 쓴다.)
 
 ## 3. ⚠️ 버전별 함정 (코드·설정 작성 시 반드시)
@@ -142,22 +142,35 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 - **`eslint: { config: { stylistic: false } }` 를 유지한다** — 켜면 eslint 기본이 single quote 라
   이 저장소 스타일(큰따옴표·세미콜론 없음)과 싸운다. 코드 스타일은 규칙으로 강제하지 않는다.
 
-### FastAPI 0.137 + Starlette 1.x
+### FastAPI 0.142 + Starlette 1.x
 - TestClient 는 **httpx2** 를 쓴다(httpx 아님). `requirements.txt` 에 `httpx2`. ⛔ `httpx` 로 되돌리면 deprecation 경고.
 - 서버↔서버 HTTP 클라이언트도 `httpx2`.
+
+### SQLAlchemy 2.1 / Alembic 1.20
+- 2.0 스타일(`Mapped`/`mapped_column`, `select()` + `db.execute(...).scalar_one_or_none()`) 그대로 동작한다. 2.0 → 2.1 상향 시 앱 코드 변경 없음, `pytest -W error::DeprecationWarning` 경고 0 (2026-10-02 확인).
+- ⚠️ **Alembic 1.20 은 `alembic.ini` 에 `path_separator` 가 없으면 DeprecationWarning** 을 낸다
+  (`prepend_sys_path` 를 공백·쉼표·콜론으로 쪼개는 레거시 동작). → `[alembic]` 에 **`path_separator = os`** 유지.
+  ⛔ `alembic.ini` 는 ASCII 전용(configparser 가 OS 로캘 인코딩으로 읽는다) — 주석에 한글 금지.
+- 마이그레이션 검증은 SQLite 가 아니라 **실제 PostgreSQL** 에서 `alembic upgrade head` + `alembic check`("No new upgrade operations detected") 로 한다.
 
 ### Pydantic 2.x
 - v2 API(`model_config`, `@field_validator`, `SettingsConfigDict`). ⛔ v1 패턴(`class Config`, `@validator`) 금지.
 
 ### 인증 / 린트·CI
 - 자체 계정 비밀번호는 **bcrypt** 해시(`core/security` 의 `hash_password`/`verify_password`).
-  ⚠️ bcrypt 는 **72바이트 초과분을 무시**한다 → 비밀번호 정책이 UTF-8 72바이트 이하를 강제한다(ARCHITECTURE.md §9).
+  ⚠️ bcrypt 는 72바이트까지만 쓴다 → 비밀번호 정책이 UTF-8 72바이트 이하를 강제한다(ARCHITECTURE.md §9).
+  ⚠️ **bcrypt 5 부터 `hashpw`/`checkpw` 가 72바이트 초과 입력에 `ValueError` 를 던진다**(4.x 는 조용히 잘랐다).
+  → 바이트 상한은 **bcrypt 호출 전에** 검사한다: 로그인은 `LoginRequest` 스키마 검증(422), 계정 생성은
+  `validate_password_policy`(`ServiceError("weak_password")`), `verify_password` 는 초과 시 `False`.
+  ⛔ 이 가드를 지우면 긴 비밀번호 한 번으로 500 이 난다(`test_login_over_72_bytes_password_is_clean_4xx`).
 - access 는 JWT(HS256, `sub` = user id, 15분) — **refresh 는 JWT 가 아니라 불투명 토큰**이다
   (`secrets.token_urlsafe(48)`, DB `sessions` 에 SHA-256 해시만, 회전 + 재사용 감지). 상세는 ARCHITECTURE.md §9.
 - `SECRET_KEY` 는 32자 미만·기본값이면 `Settings` 검증이 기동을 거부한다. 초기 관리자는 `.env` 의
   `INITIAL_ADMIN_USERNAME`/`INITIAL_ADMIN_PASSWORD` 로 시드(미설정 시 스킵) — 하드코딩 기본 계정 없음.
 - 로그인 429 rate limit 은 **인메모리(단일 프로세스 전제)** — 다중 워커 배포는 Redis 필요.
 - 백엔드 린트는 **ruff**(`backend/pyproject.toml`): FastAPI `Depends` 등은 **B008 예외**(`extend-immutable-calls`), `alembic/` 제외, line-length 120. 새 의존성으로 lint 가 깨지면 이 설정을 먼저 본다.
+  - ruff 0.16 은 `UP042`(`class X(str, enum.Enum)` → **`enum.StrEnum`**)를 낸다. `UserRole` 은 `StrEnum` 이다(사용처는 모두 `.value` 라 동작 동일).
+  - CI 게이트는 `ruff check .` 뿐이다. `ruff format` 은 강제하지 않는다(현재 코드도 format 기준과 다르다).
 - 프론트 린트는 **eslint + @nuxt/eslint**(`frontend/eslint.config.mjs`, flat config).
 - **CI**(`.github/workflows/ci.yml`)가 push·PR(main) 마다 backend(ruff+pytest) / frontend(**eslint + typecheck + build**) 를 실행. 워크플로는 생성 프로젝트(루트)에서만 동작한다.
 
@@ -169,6 +182,9 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 ## 5. 업그레이드 검증 절차 (필수)
 버전을 올릴 땐 추측 금지 — **임시 스캐폴드로 실제 검증한 뒤** 핀을 고정한다:
 1. `scaffold.ps1 -Name tmp -Target <스크래치경로> -SkipDb -SkipInstall -NoDesign`
-2. 백엔드: `python -m venv .venv` → `pip install -r requirements.txt` → `ruff check .` → `pytest -q`
+   (스크립트가 런타임 사전 점검·bootstrap 단계에서 멈추면 `skeleton/` 을 복사한 뒤 `__PROJECT_NAME__`/`__PROJECT_SNAKE__`/`__THEME_CSS__` 를 치환하고 `backend/.env`·`frontend/.env` 를 직접 만들어 대체한다)
+2. 백엔드: `python -m venv .venv` → `pip install -r requirements.txt` → `ruff check .` → `pytest -q`(+ 1회 `-W error::DeprecationWarning`)
+   → 실제 PostgreSQL(예: `docker run postgres:16`)에 `alembic upgrade head` → `alembic check`
 3. 프론트: `pnpm install` → `pnpm lint` → `pnpm typecheck` → `pnpm build`
+   (install 전후로 `package.json`·`pnpm-workspace.yaml` 이 바뀌지 않았는지 diff 로 확인 — 바뀌면 템플릿 오염)
 4. 통과 시 핀 고정 후 **갱신할 곳을 모두**: SoT 파일 + `README.md` 표(+기준일) + 필요 시 `ARCHITECTURE.md` + **이 스킬의 스냅샷/주의(§2·§3)**. 커밋/PR은 [pr-workflow].

@@ -3,9 +3,9 @@
 공통 아키텍처(FastAPI · Nuxt · PostgreSQL) 기반 프로젝트.
 상세 기준은 [`ARCHITECTURE.md`](ARCHITECTURE.md), 작업 순서는 [`PLAN.md`](PLAN.md), 디자인 토큰은 [`DESIGN.md`](DESIGN.md), AI 에이전트 지침은 [`AGENTS.md`](AGENTS.md), 프로젝트 고유 문서(PRD 등)는 [`docs/`](docs/README.md).
 
-## 기술 스택 (주요 버전, 2026-08-11 기준)
+## 기술 스택 (주요 버전, 2026-10-02 기준)
 
-> 아래 표는 **2026-08-11 기준** 요약이며, **정확한 출처(SSOT)** 는 다음 파일이다 — 변경 시 이 표가 아니라 해당 파일을 기준으로 한다:
+> 아래 표는 **2026-10-02 기준** 요약이며, **정확한 출처(SSOT)** 는 다음 파일이다 — 변경 시 이 표가 아니라 해당 파일을 기준으로 한다:
 > 런타임 [`scripts/versions.env`](scripts/versions.env) · 백엔드 [`backend/requirements.txt`](backend/requirements.txt) · 프론트 [`frontend/package.json`](frontend/package.json)
 
 ### 런타임
@@ -19,30 +19,30 @@
 ### 백엔드 (`==` 정확히 핀, 재현성 우선)
 | 패키지 | 버전 |
 |--------|------|
-| FastAPI | 0.137.2 |
-| Uvicorn | 0.49.0 |
-| SQLAlchemy | 2.0.51 |
-| Alembic | 1.18.5 |
-| psycopg2-binary | 2.9.12 |
-| Pydantic / pydantic-settings | 2.13.4 / 2.14.2 |
-| PyJWT | 2.13.0 |
-| bcrypt | 4.3.0 |
-| httpx2 | 2.5.0 |
+| FastAPI | 0.142.2 |
+| Uvicorn | 0.54.0 |
+| SQLAlchemy | 2.1.1 |
+| Alembic | 1.20.0 |
+| psycopg2-binary | 2.9.13 |
+| Pydantic / pydantic-settings | 2.13.5 / 2.15.0 |
+| PyJWT | 2.15.1 |
+| bcrypt | 5.0.0 |
+| httpx2 | 2.13.1 |
 | pytest | 9.1.1 |
-| ruff | 0.14.0 |
+| ruff | 0.16.9 |
 
 ### 프론트엔드 (`^` 범위 핀)
 | 패키지 | 버전 |
 |--------|------|
 | Nuxt | 4.5 |
 | Vue | 3.5 |
-| vue-router | 5.2 |
+| vue-router | 5.3 |
 | Pinia | 4.0 |
 | @pinia/nuxt | 1.0 |
 | Tailwind CSS | 4.3 |
 | @tailwindcss/vite | 4.3 |
 | @nuxt/eslint | 1.17 |
-| ESLint | 10.8 |
+| ESLint | 10.11 |
 | TypeScript | 6.0 |
 | vue-tsc | 3.3 |
 

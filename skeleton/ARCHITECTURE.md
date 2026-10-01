@@ -13,7 +13,7 @@
 
 | # | 고정 규칙 (MUST) | § |
 |---|------------------|---|
-| 1 | **표준 스택 고정**: 백엔드 FastAPI 0.115 + SQLAlchemy 2.0 + Alembic, 프론트 Nuxt(SPA) + Vue 3 + TS, DB는 **PostgreSQL** | §2 |
+| 1 | **표준 스택 고정**: 백엔드 FastAPI 0.142 + SQLAlchemy 2.1 + Alembic, 프론트 Nuxt(SPA) + Vue 3 + TS, DB는 **PostgreSQL** | §2 |
 | 2 | **DB는 항상 Alembic으로만 관리** — 모든 스키마 생성·변경은 마이그레이션. ⛔ dev/운영 런타임 `create_all`·자동 DDL·수동 `ALTER` 금지(테스트 in-memory만 예외) | §11 |
 | 3 | **설정은 OS 무관하게 `.env`로 주입** — 동일 `.env`가 Windows/mac/Linux에서 동작. ⛔ 개발 중 `$env:`/`export`/`set` 셸 환경변수 의존 금지. ⛔ `.env` 커밋 금지(`.env.example`만) | §5, §17 |
 | 4 | **시각은 KST 단일 기준** — `now()`는 naive `datetime.now()`, PostgreSQL `connect_args`에 `timezone=Asia/Seoul`, 런타임 `TZ=Asia/Seoul`. ⛔ UTC 변환/`ZoneInfo` 신규 도입 금지 | §10, §7 |
@@ -66,8 +66,8 @@
 
 ### 백엔드
 - **언어/런타임**: Python 3.10+ (`X | None` 문법, `Mapped[]` 타입 힌트 사용)
-- **프레임워크**: FastAPI 0.115.x + Uvicorn(`[standard]`)
-- **ORM/마이그레이션**: SQLAlchemy 2.0 (`Mapped`/`mapped_column`) + Alembic
+- **프레임워크**: FastAPI 0.142.x + Uvicorn(`[standard]`)
+- **ORM/마이그레이션**: SQLAlchemy 2.1 (`Mapped`/`mapped_column`) + Alembic
 - **DB 드라이버**: PostgreSQL + `psycopg2-binary`
 - **설정**: `pydantic-settings` (BaseSettings)
 - **검증/직렬화**: Pydantic 2.x
@@ -338,7 +338,7 @@ class Base(DeclarativeBase):
 
 ## 8. 모델 · 스키마 · 서비스 규칙
 
-### 모델 (`models/`) — SQLAlchemy 2.0 `Mapped`
+### 모델 (`models/`) — SQLAlchemy 2.x `Mapped`
 ```python
 from datetime import datetime
 from sqlalchemy import DateTime, Integer, String
@@ -846,15 +846,13 @@ PR 리뷰 단계가 없으므로 **커밋·push 전 검증을 건너뛰면 깨�
 
 push 전에 반드시 통과시킨다:
 
-  ## 테스트
-  - 추가/수정한 테스트와 결과 (pytest, 프론트 등)
+```powershell
+cd backend;  .\.venv\Scripts\python -m pytest -q;  .\.venv\Scripts\python -m ruff check .
+cd ..\frontend;  pnpm lint;  pnpm typecheck;  pnpm build
+```
 
-  ## 체크리스트
-  - [ ] 모든 테스트 통과 + 린트 경고 0
-  - [ ] Structural/Behavioral 를 섞지 않음
-  - [ ] DB 변경 시 Alembic 마이그레이션 포함 (§11)
-  - [ ] 설정 변경 시 `.env.example` 갱신 (§5, §17)
-  ```
+- 실패했거나 확인하지 않았으면 push 하지 않는다.
+- push 후 CI가 실패하면 **되돌리거나 즉시 고치는 커밋을 올린다.** 실패 상태를 방치하지 않는다.
 
 ### 커밋 단위
 - **하나의 커밋은 Structural·Behavioral 중 하나만** 담는다(§18 Tidy First). 브랜치가 없어도 이 분리는 유지한다.

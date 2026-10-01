@@ -77,6 +77,13 @@ def test_create_user_rejects_short_password(db_session):
     assert exc.value.code == "weak_password"
 
 
+def test_create_user_rejects_over_72_bytes_password(db_session):
+    # bcrypt 5 는 72바이트 초과 입력에 ValueError 를 던진다 → 정책 검증에서 먼저 막아 500 을 피한다.
+    with pytest.raises(ServiceError) as exc:
+        user_service.create_user(db_session, username="u1", password="a" * 73)
+    assert exc.value.code == "weak_password"
+
+
 # ---------- 로그인 ----------
 
 
@@ -100,6 +107,13 @@ def test_login_wrong_password_401(client, db_session):
     _seed_admin(db_session)
     res = client.post(LOGIN, json={"username": "admin", "password": "nope-nope"})
     assert res.status_code == 401
+
+
+def test_login_over_72_bytes_password_is_clean_4xx(client, db_session):
+    # bcrypt 5 의 72바이트 초과 ValueError 가 500 으로 새지 않아야 한다(스키마 검증 422).
+    _seed_admin(db_session)
+    res = client.post(LOGIN, json={"username": "admin", "password": "a" * 73})
+    assert res.status_code == 422
 
 
 # ---------- refresh 회전 ----------

@@ -2,7 +2,7 @@
 import pytest
 
 from app.config import Settings
-from app.core.security import validate_password_policy
+from app.core.security import hash_password, validate_password_policy, verify_password
 
 # ---------- Settings 검증 ----------
 
@@ -35,6 +35,18 @@ def test_password_policy_rejects_short():
 def test_password_policy_rejects_over_72_bytes():
     with pytest.raises(ValueError):
         validate_password_policy("한" * 25)  # 75바이트
+
+
+def test_hash_password_rejects_over_72_bytes():
+    with pytest.raises(ValueError):
+        hash_password("a" * 73)
+
+
+def test_verify_password_over_72_bytes_returns_false():
+    # bcrypt 5 의 checkpw 는 72바이트 초과에 ValueError — verify_password 는 예외 없이 False.
+    hashed = hash_password("a" * 72)
+    assert verify_password("a" * 72, hashed) is True
+    assert verify_password("a" * 73, hashed) is False
 
 
 def test_password_policy_accepts_plain_long_password():

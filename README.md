@@ -31,7 +31,7 @@ mindmap
   root((FastAPI + Nuxt + PostgreSQL 스타터))
     백엔드
       FastAPI + Uvicorn
-      SQLAlchemy 2.0
+      SQLAlchemy 2.1
       Alembic 마이그레이션
       pytest + ruff
       PostgreSQL
@@ -229,6 +229,15 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
 > 전역 설정(`~/.claude/CLAUDE.md` 등) 없이도 어떤 에이전트든 같은 규칙을 따르게 하기 위해서다.
 
 ## 검증 상태
+
+**2026-10-02 의존성 상향 재검증** (Windows 11, Python 3.13.12 / Node 24.14.0 / pnpm 11.28.3) —
+`skeleton/` 복사 + 토큰 치환으로 만든 임시 프로젝트에서 확인했다(스캐폴드 스크립트는 이 환경에서 런타임 사전 점검·bootstrap 단계에서 중단됨).
+
+- 백엔드: `ruff check .` 통과, `pytest -q` 31건 통과(`-W error::DeprecationWarning` 포함)
+- PostgreSQL 16(docker): `alembic upgrade head`(0001 → 0003) · `downgrade base` 왕복 · `alembic check` 변경 없음,
+  관리자 로그인 → `/auth/me` → `/auth/refresh` 200, 72바이트 초과 비밀번호 로그인 422
+- 프론트: `pnpm install` · `pnpm lint` · `pnpm typecheck` · `pnpm build` · `pnpm generate` 모두 exit 0,
+  install 후 `package.json`·`pnpm-workspace.yaml` 변경 없음
 
 아래는 macOS(Darwin 25.5, Python 3.13.14 / Node 24.18.0 / pnpm 11.9.0)에서
 `scaffold.sh` 로 실제 프로젝트를 생성해 확인한 결과다.
