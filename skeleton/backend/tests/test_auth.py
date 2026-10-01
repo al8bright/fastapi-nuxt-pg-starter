@@ -1,4 +1,4 @@
-"""인증 유저플로우 테스트 (architecture.md §12).
+"""인증 유저플로우 테스트 (ARCHITECTURE.md §12).
 
 로그인(access JWT + httpOnly refresh 쿠키), 회전, 재사용 감지, 로그아웃,
 브루트포스 방어, 관리자 시드, 비밀번호 정책을 검증한다.

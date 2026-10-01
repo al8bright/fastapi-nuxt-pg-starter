@@ -1,6 +1,6 @@
 import { useAuthApi } from "~/api/auth"
 
-// 인증 컴포저블 (architecture.md §13, §14).
+// 인증 컴포저블 (ARCHITECTURE.md §13, §14).
 // Nuxt 판은 쿼리 라이브러리(react-query/svelte-query) 대신 내장 useAsyncData 를 쓴다.
 // 키("auth:me")가 캐시 키 역할을 하므로 같은 키를 쓰는 여러 컴포넌트가 요청을 공유한다.
 // ⛔ 컴포넌트에서 ref + onMounted 로 직접 패칭하지 말 것 — 반드시 이 계층을 통한다.

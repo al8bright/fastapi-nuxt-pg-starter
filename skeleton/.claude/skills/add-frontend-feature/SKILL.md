@@ -1,11 +1,11 @@
 ---
 name: add-frontend-feature
-description: __PROJECT_NAME__ 프론트엔드에 기능·페이지·API 호출을 추가할 때 사용. $fetch(ofetch) + Nuxt useAsyncData/useFetch + Pinia 표준(app/api/<domain>.ts → app/composables → app/pages·app/components)과 보호 라우트(middleware)/인증 흐름을 architecture.md §13·§14 기준으로 안내한다.
+description: __PROJECT_NAME__ 프론트엔드에 기능·페이지·API 호출을 추가할 때 사용. $fetch(ofetch) + Nuxt useAsyncData/useFetch + Pinia 표준(app/api/<domain>.ts → app/composables → app/pages·app/components)과 보호 라우트(middleware)/인증 흐름을 ARCHITECTURE.md §13·§14 기준으로 안내한다.
 ---
 
 # 프론트엔드 기능 추가
 
-표준 스택: **`$fetch`(ofetch) + Nuxt 내장 `useAsyncData`/`useFetch` + Pinia** (architecture.md §13). 패키지 매니저는 **pnpm**(⛔ npm 금지).
+표준 스택: **`$fetch`(ofetch) + Nuxt 내장 `useAsyncData`/`useFetch` + Pinia** (ARCHITECTURE.md §13). 패키지 매니저는 **pnpm**(⛔ npm 금지).
 프레임워크는 **Nuxt(SPA 모드)** — `ssr: false` + `nuxt generate` 정적 산출. 서버 전용 기능은 쓰지 않는다([stack-versions] 참조).
 ⛔ **axios 를 새로 추가하지 마라** — HTTP 는 `$fetch` 하나로 통일한다.
 

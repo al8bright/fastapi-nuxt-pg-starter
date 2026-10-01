@@ -1,4 +1,4 @@
-"""refresh 세션 서비스 (architecture.md §8, §9) — 비즈니스 로직.
+"""refresh 세션 서비스 (ARCHITECTURE.md §8, §9) — 비즈니스 로직.
 
 httpOnly 쿠키로 전달되는 refresh 토큰의 발급·회전·폐기를 담당한다.
 - DB 에는 토큰 원문이 아니라 sha256 해시만 저장한다.

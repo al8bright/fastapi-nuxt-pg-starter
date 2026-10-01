@@ -1,4 +1,4 @@
-"""세션 모델 (architecture.md §8, §9).
+"""세션 모델 (ARCHITECTURE.md §8, §9).
 
 refresh 토큰 기반 DB 세션. 토큰 원문은 저장하지 않고 sha256 해시만 저장한다.
 revoked_at 이 기록된 세션의 재사용은 토큰 탈취 신호로 간주한다 (session_service.rotate).

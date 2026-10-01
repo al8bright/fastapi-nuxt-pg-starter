@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// My 화면 (architecture.md §14). 로그인 사용자 정보 + 로그아웃.
+// My 화면 (ARCHITECTURE.md §14). 로그인 사용자 정보 + 로그아웃.
 definePageMeta({ middleware: "auth" })
 
 const { data: me, status: meStatus } = useMe()

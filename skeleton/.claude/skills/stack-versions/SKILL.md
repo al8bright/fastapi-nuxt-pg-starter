@@ -58,7 +58,7 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 - ⚠️ **정적 생성 단계는 Node 에서 돈다** → `localStorage`/`window` 같은 브라우저 API 를 직접 만지면 빌드가 깨진다.
   접근에는 **`import.meta.client` 가드 필수**,
   `app/middleware/auth.ts` 도 맨 앞에 `if (!import.meta.client) return` 을 둬 생성 단계에서는 통과시킨다.
-  (인증 토큰은 애초에 `localStorage` 에 두지 않는다 — access 는 Pinia 메모리, refresh 는 HttpOnly 쿠키. architecture.md §9·§14)
+  (인증 토큰은 애초에 `localStorage` 에 두지 않는다 — access 는 Pinia 메모리, refresh 는 HttpOnly 쿠키. ARCHITECTURE.md §9·§14)
 - 환경변수 접두는 **`NUXT_PUBLIC_`**(⛔ `VITE_` 아님). 코드에서는 `useRuntimeConfig().public.*` 로 읽고,
   기본값은 `nuxt.config.ts` 의 `runtimeConfig.public` 에 둔다. ⛔ `import.meta.env` 직접 참조 금지.
   - ⚠️ 매핑 규칙은 **camelCase ↔ SCREAMING_SNAKE 자동 변환**이다(`public.apiBaseUrl` ↔ `NUXT_PUBLIC_API_BASE_URL`) → 키 이름을 마음대로 못 짓는다.
@@ -151,9 +151,9 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 
 ### 인증 / 린트·CI
 - 자체 계정 비밀번호는 **bcrypt** 해시(`core/security` 의 `hash_password`/`verify_password`).
-  ⚠️ bcrypt 는 **72바이트 초과분을 무시**한다 → 비밀번호 정책이 UTF-8 72바이트 이하를 강제한다(architecture.md §9).
+  ⚠️ bcrypt 는 **72바이트 초과분을 무시**한다 → 비밀번호 정책이 UTF-8 72바이트 이하를 강제한다(ARCHITECTURE.md §9).
 - access 는 JWT(HS256, `sub` = user id, 15분) — **refresh 는 JWT 가 아니라 불투명 토큰**이다
-  (`secrets.token_urlsafe(48)`, DB `sessions` 에 SHA-256 해시만, 회전 + 재사용 감지). 상세는 architecture.md §9.
+  (`secrets.token_urlsafe(48)`, DB `sessions` 에 SHA-256 해시만, 회전 + 재사용 감지). 상세는 ARCHITECTURE.md §9.
 - `SECRET_KEY` 는 32자 미만·기본값이면 `Settings` 검증이 기동을 거부한다. 초기 관리자는 `.env` 의
   `INITIAL_ADMIN_USERNAME`/`INITIAL_ADMIN_PASSWORD` 로 시드(미설정 시 스킵) — 하드코딩 기본 계정 없음.
 - 로그인 429 rate limit 은 **인메모리(단일 프로세스 전제)** — 다중 워커 배포는 Redis 필요.
@@ -162,7 +162,7 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 - **CI**(`.github/workflows/ci.yml`)가 push·PR(main) 마다 backend(ruff+pytest) / frontend(**eslint + typecheck + build**) 를 실행. 워크플로는 생성 프로젝트(루트)에서만 동작한다.
 
 ## 4. 백엔드 핀 정책
-- `requirements.txt` 는 **`==` 정확 핀, 재현성 우선**(architecture.md §2).
+- `requirements.txt` 는 **`==` 정확 핀, 재현성 우선**(ARCHITECTURE.md §2).
 - 런타임 최소를 올린다고(예: 3.13) 핀을 자동으로 올리지 말 것 — **호환되면 유지**(현재 핀은 3.13 호환 확인됨).
 - 핀 상향은 보안/기능 목적의 **의식적 결정**으로. FastAPI 는 "최신이 아닌 안정화된 마이너" 선호.
 
@@ -171,4 +171,4 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 1. `scaffold.ps1 -Name tmp -Target <스크래치경로> -SkipDb -SkipInstall -NoDesign`
 2. 백엔드: `python -m venv .venv` → `pip install -r requirements.txt` → `ruff check .` → `pytest -q`
 3. 프론트: `pnpm install` → `pnpm lint` → `pnpm typecheck` → `pnpm build`
-4. 통과 시 핀 고정 후 **갱신할 곳을 모두**: SoT 파일 + `README.md` 표(+기준일) + 필요 시 `docs/architecture.md` + **이 스킬의 스냅샷/주의(§2·§3)**. 커밋/PR은 [pr-workflow].
+4. 통과 시 핀 고정 후 **갱신할 곳을 모두**: SoT 파일 + `README.md` 표(+기준일) + 필요 시 `ARCHITECTURE.md` + **이 스킬의 스냅샷/주의(§2·§3)**. 커밋/PR은 [pr-workflow].

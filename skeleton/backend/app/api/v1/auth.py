@@ -1,4 +1,4 @@
-"""인증 라우터 (architecture.md §4, §9) — 얇은 HTTP 계층.
+"""인증 라우터 (ARCHITECTURE.md §4, §9) — 얇은 HTTP 계층.
 
 자체 계정 username/password 로그인 → access JWT(응답 본문) + refresh 토큰(httpOnly 쿠키).
 refresh 토큰은 DB 세션(services/session_service.py)으로 관리하며 매 회전마다 교체된다.

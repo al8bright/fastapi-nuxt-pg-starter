@@ -1,4 +1,4 @@
-"""FastAPI 진입점 (architecture.md §4).
+"""FastAPI 진입점 (ARCHITECTURE.md §4).
 
 - /api/v1 버전 prefix
 - CORS 미들웨어 (메서드/헤더 최소 허용)
@@ -57,7 +57,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
-    """모든 응답에 기본 보안 헤더를 붙인다 (architecture.md §9)."""
+    """모든 응답에 기본 보안 헤더를 붙인다 (ARCHITECTURE.md §9)."""
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"

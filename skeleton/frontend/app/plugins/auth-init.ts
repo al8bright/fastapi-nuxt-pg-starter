@@ -1,6 +1,6 @@
 import { useAuthApi } from "~/api/auth"
 
-// 세션 복원 플러그인 (architecture.md §14). 파일명이 api.ts 다음 알파벳 순서라 $api 이후에 로드된다.
+// 세션 복원 플러그인 (ARCHITECTURE.md §14). 파일명이 api.ts 다음 알파벳 순서라 $api 이후에 로드된다.
 // SPA 라 새로고침하면 메모리의 access 토큰이 사라진다 → 앱 부팅 시 HttpOnly refresh 쿠키로
 // /auth/refresh 를 1회 시도해 세션을 복원한다. await 로 라우트 미들웨어(auth 가드)보다 먼저 끝낸다.
 export default defineNuxtPlugin(async () => {

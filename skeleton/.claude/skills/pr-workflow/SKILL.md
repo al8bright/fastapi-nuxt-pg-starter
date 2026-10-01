@@ -1,20 +1,27 @@
 ---
 name: pr-workflow
-description: __PROJECT_NAME__ 에서 변경을 커밋·push 할 때 사용. main 직접 커밋 기본 흐름, push 전 로컬 검증 게이트, 커밋 메시지 형식([Structural]/[Behavioral]), Structural·Behavioral 분리, 선택적 브랜치·PR 사용 기준을 architecture.md §19·§20 기준으로 안내한다.
+description: __PROJECT_NAME__ 에서 변경을 커밋·push 할 때 사용. main 직접 커밋 기본 흐름, push 전 로컬 검증 게이트, 커밋 메시지 형식([Structural]/[Behavioral]), Structural·Behavioral 분리, 선택적 브랜치·PR 사용 기준을 ARCHITECTURE.md §19·§20 기준으로 안내한다.
 ---
 
 # 커밋 · push (브랜치·PR은 선택)
 
-> 기본 흐름은 **`main`에서 작업 → 로컬 검증 → 커밋 → push** 다. (architecture.md §20)
+> 기본 흐름은 **`main`에서 작업 → 로컬 검증 → 커밋 → push** 다. (ARCHITECTURE.md §20)
 
 ## ⛔ push 전 로컬 검증이 유일한 게이트다
 
 PR 리뷰 단계가 없으므로 **검증을 건너뛰면 깨진 코드가 곧바로 `main`에 남는다.**
 CI는 push 이후에 도는 **사후 안전망**이지 사전 게이트가 아니다.
 
+```bash
+# macOS / Linux
+cd backend && ./.venv/bin/python -m pytest -q && ./.venv/bin/python -m ruff check .
+cd ../frontend && pnpm lint && pnpm typecheck && pnpm build
+```
+
 ```powershell
+# Windows
 cd backend;  .\.venv\Scripts\python -m pytest -q;  .\.venv\Scripts\python -m ruff check .
-cd ..\frontend;  pnpm test;  pnpm lint;  pnpm build
+cd ..\frontend;  pnpm lint;  pnpm typecheck;  pnpm build
 ```
 
 - 실패했거나 확인하지 않았으면 **push 하지 않는다.**
@@ -58,7 +65,7 @@ gh pr create --fill --base main
 gh pr merge --squash --delete-branch
 ```
 
-- `gh`가 없으면: `winget install GitHub.cli` 후 `gh auth login`.
+- `gh`가 없으면: `brew install gh`(macOS) 또는 `winget install GitHub.cli`(Windows) 후 `gh auth login`.
 - 원격(remote)이 아직 없으면 먼저 연결한다(`git remote add origin <url>`).
 
 ## 협업자가 생기면

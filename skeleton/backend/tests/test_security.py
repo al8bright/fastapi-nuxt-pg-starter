@@ -1,4 +1,4 @@
-"""보안 설정·헤더 테스트 (architecture.md §9, §12)."""
+"""보안 설정·헤더 테스트 (ARCHITECTURE.md §9, §12)."""
 import pytest
 
 from app.config import Settings

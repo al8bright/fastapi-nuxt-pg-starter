@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 로그인 화면 (architecture.md §14). 성공 시 메인(/)으로 이동.
+// 로그인 화면 (ARCHITECTURE.md §14). 성공 시 메인(/)으로 이동.
 // 이 페이지만 auth 가드를 걸지 않는다.
 const authStore = useAuthStore()
 const loginMutation = useLogin()

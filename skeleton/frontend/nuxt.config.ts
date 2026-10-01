@@ -1,6 +1,6 @@
 import tailwindcss from "@tailwindcss/vite"
 
-// Nuxt 설정 (architecture.md §13).
+// Nuxt 설정 (ARCHITECTURE.md §13).
 // SPA 모드: 백엔드가 별도 FastAPI 서버이고 access 토큰은 메모리, refresh 토큰은
 // HttpOnly 쿠키(DB 세션)로 관리하므로 SSR 없이 SPA 로 충분하다.
 // ssr: false + nuxt generate → 빈 셸(index.html) + SPA fallback(200.html) 만 미리 만들고 렌더링은 전부 브라우저에서 한다.
@@ -25,7 +25,7 @@ export default defineNuxtConfig({
     },
   },
 
-  // 프론트 환경변수 (architecture.md §17). NUXT_PUBLIC_* 로 덮인다 (VITE_ 아님).
+  // 프론트 환경변수 (ARCHITECTURE.md §17). NUXT_PUBLIC_* 로 덮인다 (VITE_ 아님).
   // 예) NUXT_PUBLIC_API_BASE_URL=https://api.example.com → public.apiBaseUrl
   runtimeConfig: {
     public: {
@@ -34,7 +34,7 @@ export default defineNuxtConfig({
     },
   },
 
-  // Tailwind v4 는 PostCSS 설정 없이 Vite 플러그인으로 붙인다 (architecture.md §15).
+  // Tailwind v4 는 PostCSS 설정 없이 Vite 플러그인으로 붙인다 (ARCHITECTURE.md §15).
   vite: {
     plugins: [tailwindcss()],
   },

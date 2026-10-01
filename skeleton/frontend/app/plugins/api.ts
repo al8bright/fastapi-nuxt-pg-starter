@@ -1,11 +1,11 @@
 import { FetchError } from "ofetch"
 import type { TokenResponse } from "~/api/auth"
 
-// HTTP 클라이언트 (architecture.md §13). axios 대신 Nuxt 내장 $fetch(ofetch)를 쓴다.
+// HTTP 클라이언트 (ARCHITECTURE.md §13). axios 대신 Nuxt 내장 $fetch(ofetch)를 쓴다.
 // $fetch.create 인스턴스를 provide 하면 컴포저블에서 useNuxtApp().$api 로 꺼내 쓸 수 있다.
 // baseURL 미설정 시 nitro devProxy(/api/v1)를 탄다.
 //
-// 인증 흐름 (architecture.md §14): 스토어(메모리)의 access 토큰을 Bearer 로 주입하고,
+// 인증 흐름 (ARCHITECTURE.md §14): 스토어(메모리)의 access 토큰을 Bearer 로 주입하고,
 // 401 이면 HttpOnly refresh 쿠키로 access 토큰을 재발급받아 원 요청을 1회만 재시도한다.
 // ofetch 인터셉터(onResponseError)는 응답을 대체할 수 없으므로,
 // 재시도는 $fetch.create 인스턴스를 감싼 래퍼 함수로 구현한다.

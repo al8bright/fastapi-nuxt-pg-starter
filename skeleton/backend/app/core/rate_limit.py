@@ -1,4 +1,4 @@
-"""로그인 브루트포스 방어 — 슬라이딩 윈도우 실패 카운터 (architecture.md §9).
+"""로그인 브루트포스 방어 — 슬라이딩 윈도우 실패 카운터 (ARCHITECTURE.md §9).
 
 (username, client_ip) 키별로 최근 실패 시각을 기록하고, 윈도우 안에서 실패가
 max_failures 에 도달하면 차단한다. 시각은 core.security.now()(KST naive)를 쓴다.

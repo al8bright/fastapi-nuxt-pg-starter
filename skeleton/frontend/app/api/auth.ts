@@ -1,4 +1,4 @@
-// 인증 API (architecture.md §13, §14).
+// 인증 API (ARCHITECTURE.md §13, §14).
 // 플러그인이 provide 한 $api 를 쓰므로 setup / 컴포저블 / 플러그인 컨텍스트 안에서 호출해야 한다.
 export type UserRole = "user" | "admin"
 
