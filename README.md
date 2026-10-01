@@ -108,9 +108,9 @@ sequenceDiagram
     F-->>U: 미인증 → 로그인 화면
     U->>F: 아이디·비밀번호 입력
     F->>A: POST /api/v1/auth/login
-    A->>D: 사용자 조회 + bcrypt 검증 + sessions 세션 생성
+    A->>D: 로그인 잠금 확인(login_throttles) + bcrypt 검증 + auth_sessions 세션 생성
     D-->>A: user
-    A-->>F: access_token 바디 + refresh_token HttpOnly 쿠키
+    A-->>F: access_token 바디(refresh_token 은 null) + refresh_token HttpOnly 쿠키
     F->>F: access 토큰을 Pinia 메모리에 두고 메인으로 이동
     F->>A: GET /api/v1/auth/me
     A-->>F: 사용자 정보
@@ -192,7 +192,7 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
 2. 이름/위치 입력 → `PascalCase`를 `snake_case`(DB명·토큰키)로 변환
 3. **DESIGN.md 적용 여부 질문** → 적용 시 `colors`/`typography`를 Tailwind `@theme`로 변환해 `frontend/app/assets/css/main.css`에 주입(`DESIGN.md` 는 적용 여부와 무관하게 항상 포함)
 4. `skeleton/` 복사 + 토큰 치환(`__PROJECT_NAME__`, `__PROJECT_SNAKE__`, 테마) + 런타임 핀 파일 이관
-5. **PostgreSQL 접속정보(host/port/user/password/db) 질문** → `backend/.env`·`frontend/.env` 생성(`DATABASE_URL`·`SECRET_KEY`(랜덤)·`INITIAL_ADMIN_USERNAME`/`INITIAL_ADMIN_PASSWORD`(랜덤 생성 후 출력) 주입)
+5. **PostgreSQL 접속정보(host/port/user/password/db) 질문** → `backend/.env`·`frontend/.env` 생성(`DATABASE_URL`·`SECRET_KEY`(랜덤)·`REFRESH_TOKEN_TRANSPORT=cookie`·`APP_ENV=development`·`SEED_DEFAULT_ADMIN=true`/`DEFAULT_ADMIN_PASSWORD`(랜덤 생성 후 출력) 주입, 기존 `backend/.env` 는 `.env.bak.<시각>` 으로 백업, 권한은 현재 사용자로 제한)
 6. 백엔드: `python -m venv .venv` + `pip install -r requirements.txt`
 7. **psql 로 DB 생성** → **Alembic `upgrade head` 로 테이블 생성**(DB는 항상 Alembic으로 관리 §11)
 8. 프론트: `pnpm install`
@@ -229,6 +229,19 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
 > 전역 설정(`~/.claude/CLAUDE.md` 등) 없이도 어떤 에이전트든 같은 규칙을 따르게 하기 위해서다.
 
 ## 검증 상태
+
+**2026-10-02 공통 백엔드 교체 검증** (Windows 11, Python 3.13.14 / pnpm 11.28.3) —
+`scaffold.ps1 -SkipDb -NoDesign` 으로 만든 임시 프로젝트 + PostgreSQL 16(docker)에서 확인했다.
+
+- 백엔드: `skeleton/backend/` 가 공통 백엔드와 동일(`.env.example` 제외, `diff -r`), `ruff check .` 통과,
+  `pytest -q` 83건 통과(`-W error::DeprecationWarning` 포함)
+- PostgreSQL: `alembic upgrade head`(0001 → 0002 → `0003_auth_sessions`) 로 `app_meta`·`users`·`auth_sessions`·`login_throttles` 생성
+- 실구동(Nuxt dev 출처 → devProxy → uvicorn, curl + 쿠키 저장소): 로그인 200(`Set-Cookie: refresh_token; HttpOnly; Path=/api/v1/auth;
+  SameSite=lax`, 본문 `refresh_token: null`) → `/auth/me` Bearer 200 → 쿠키 refresh 200(쿠키 회전) → 유예(60초) 내 이전 쿠키 200,
+  유예 후 이전 쿠키·위조 쿠키 401 + 쿠키 삭제(세션 폐기, 현재 쿠키도 401) → 로그아웃 204 + 쿠키 삭제 → 이전 access 401 · refresh 401,
+  잘못된 비밀번호 5회 후 6번째 429(`Retry-After` 없음, 올바른 비밀번호도 429)
+- 프론트: `pnpm install` · `pnpm lint` · `pnpm typecheck` · `pnpm build` · `pnpm generate` 모두 exit 0
+- 브라우저 화면 렌더링(로그인 오류 문구 표시 포함)은 이번에 확인하지 않았다.
 
 **2026-10-02 의존성 상향 재검증** (Windows 11, Python 3.13.12 / Node 24.14.0 / pnpm 11.28.3) —
 `skeleton/` 복사 + 토큰 치환으로 만든 임시 프로젝트에서 확인했다(스캐폴드 스크립트는 이 환경에서 런타임 사전 점검·bootstrap 단계에서 중단됨).
@@ -276,9 +289,9 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
 
 **미검증**
 
-- 인증 재설계 반영분: 위 검증은 인증 재설계(불투명 refresh 토큰 + HttpOnly 쿠키 + `sessions` 회전,
-  `skeleton/ARCHITECTURE.md` §9) **이전** 골격으로 수행했다. refresh 회전·재사용 감지·429 rate limit·
-  초기 관리자 `.env` 시드는 재설계 이후 아직 재검증하지 않았다.
+- 인증 재설계 반영분: 위 macOS 검증은 인증 재설계(불투명 refresh 토큰 + HttpOnly 쿠키 + DB 세션 회전,
+  `skeleton/ARCHITECTURE.md` §9) **이전** 골격으로 수행했다(재설계 이후 Windows 검증은 맨 위 항목 참조). refresh 회전·재사용 감지·429·
+  초기 관리자 `.env` 시드는 macOS(`scaffold.sh`)에서는 아직 재검증하지 않았다.
 - PostgreSQL 경로: `--skip-db` 로 검증했으므로 `psql` DB 생성 + PostgreSQL 상대 `alembic upgrade head` 는
   확인하지 못했다. 마이그레이션은 SQLite 로만 검증했다.
 - `scaffold.ps1`(Windows/PowerShell): 실행 환경이 없어 검증하지 못했다. bash 판과 동일한

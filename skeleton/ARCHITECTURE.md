@@ -23,7 +23,7 @@
 | 8 | **계층 분리** — 라우터(`api/`)는 HTTP만 얇게, 도메인 로직은 `services/`, 검증/직렬화는 `schemas/` | §4, §8 |
 | 9 | **프론트 표준 스택 고정**: `$fetch`(ofetch) + Nuxt `useAsyncData`/`useFetch` + Pinia. ⛔ 서버 상태를 `ref` + `onMounted`로 직접 패칭 금지 | §2, §13 |
 | 10 | **패키지 매니저는 pnpm** — ⛔ npm 사용 금지 | §2 |
-| 11 | **인증은 access JWT(메모리, 15분) + refresh HttpOnly 쿠키(DB `sessions`, 회전)** — API 요청은 `Authorization: Bearer <access>`, 검증 실패 시 401. ⛔ 토큰의 `localStorage` 저장 금지 | §9 |
+| 11 | **인증은 access JWT(메모리, 15분, `sid` 클레임) + refresh HttpOnly 쿠키(DB `auth_sessions`, 회전·재사용 감지·즉시 폐기)** — API 요청은 `Authorization: Bearer <access>`, 검증 실패 시 401. 로그인 시도 제한은 DB `login_throttles`(429). ⛔ 토큰의 `localStorage` 저장 금지 | §9 |
 | 12 | **테스트는 pytest + SQLite in-memory** — `get_settings.cache_clear()` autouse, `dependency_overrides`로 격리 | §12 |
 | 13 | **TDD + Tidy First** — Red→Green→Refactor, 구조 변경과 동작 변경을 한 커밋에 섞지 않음 | §18 |
 | 14 | **커밋 메시지**: `[Structural]`/`[Behavioral]` + conventional type, 테스트·린트 통과 시에만 | §19 |
@@ -71,7 +71,7 @@
 - **DB 드라이버**: PostgreSQL + `psycopg2-binary`
 - **설정**: `pydantic-settings` (BaseSettings)
 - **검증/직렬화**: Pydantic 2.x
-- **인증**: access JWT(`PyJWT`) + 불투명 refresh 토큰(DB `sessions` 테이블, §9). **OIDC/SSO 연동 → `python-jose[cryptography]`**
+- **인증**: access JWT(`PyJWT`) + 불투명 refresh 토큰(DB `auth_sessions` 테이블, §9), 로그인 시도 제한(DB `login_throttles`). **OIDC/SSO 연동 → `python-jose[cryptography]`**
 - **테스트**: `pytest` + SQLite in-memory
 - **HTTP 클라이언트(서버↔서버)**: `httpx2` (httpx 의 유지보수 후속, Starlette 1.x TestClient 호환)
 - **버전 고정**: `requirements.txt`에 **`==` 정확한 버전 핀** (재현성 우선)
@@ -223,16 +223,28 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore",
     )
 
+    # 실행 환경 — "production" 이면 안전하지 않은 기본값으로 기동하지 않는다 (§9)
+    app_env: str = "development"
+
     # DB
     database_url: str | None = None
 
-    # 인증 (§9)
-    secret_key: str = ""                        # 32자 미만·기본값이면 기동 거부 (검증은 §9)
+    # JWT / 세션 — access 는 짧게(탈취 창 축소), 갱신은 DB 세션 기반 refresh 토큰이 담당한다 (§9)
+    secret_key: str = DEFAULT_SECRET_KEY  # "change-me-in-production-use-32-bytes"
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 14
-    cookie_secure: bool = False                 # 운영(HTTPS)에서는 true
-    initial_admin_username: str | None = None   # 미설정이면 관리자 시드 스킵
-    initial_admin_password: str | None = None
+
+    # 로그인 시도 제한 — 계정별 연속 실패가 max 이상이면 lockout 분 동안 429 (§9)
+    login_max_failures: int = 5
+    login_lockout_minutes: int = 15
+
+    # refresh 토큰 전달 방식 (§9) — 이 템플릿(브라우저 SPA)은 cookie
+    refresh_token_transport: Literal["cookie", "body"] = "cookie"
+    cookie_secure: bool = False  # 운영(HTTPS)에서는 true (production + cookie 에서 false 면 기동 거부)
+
+    # 초기 시드 — 기본은 꺼짐. 개발 환경에서만 .env 로 켠다. ⛔ 비밀번호 기본값 없음
+    seed_default_admin: bool = False
+    default_admin_password: str | None = None
 
     # CORS
     cors_origins: str = "http://localhost:5173"
@@ -369,56 +381,73 @@ class Order(Base):
 
 ## 9. 인증 (access JWT + refresh 세션 · SSO)
 
-`core/security.py`에 토큰 생성/검증과 `now()`를 둔다.
+- `core/security.py`에 토큰 생성/검증과 비밀번호 정책, `now()`를 둔다. 세션(refresh) 도메인 로직은 `services/session_service.py`, 로그인·스로틀은 `services/user_service.py`, HTTP 변환은 `api/v1/auth.py`가 담당한다(§4 계층 분리 그대로).
 
-### 토큰 모델 (자체 계정)
+### 토큰 모델 (자체 계정 — skeleton 구현)
 
-- **access 토큰**: JWT(HS256, `PyJWT`), 만료 **15분**(`ACCESS_TOKEN_EXPIRE_MINUTES`), `sub` = user id.
+- **access 토큰**: `PyJWT` HS256 JWT. 클레임은 `sub`(user id 문자열)·`sid`(세션 id)·`iat`·`exp`·`typ:"access"`. 만료 `ACCESS_TOKEN_EXPIRE_MINUTES` **기본 15분** — 짧게 잡아 탈취 창을 줄이고, 갱신은 refresh 토큰이 담당한다.
   로그인/refresh **응답 바디**로만 내려주고, 클라이언트는 **메모리에만** 보관한다(§14).
-  API 요청은 `Authorization: Bearer <access>` 헤더. 검증 실패는 401 + `WWW-Authenticate: Bearer`.
-- **refresh 토큰**: JWT 가 아니라 **불투명(opaque) 토큰**(`secrets.token_urlsafe(48)`).
-  DB `sessions` 테이블에 **SHA-256 해시만** 저장한다 — 서버가 원문을 갖지 않으므로 DB 가 유출돼도
-  토큰을 복원할 수 없고, JWT 와 달리 **세션 단위 즉시 폐기(revoke)** 가 가능하다. 이것이 불투명 토큰을 쓰는 이유다.
-- **refresh 쿠키**: 이름 `refresh_token`, **HttpOnly**(JS 접근 불가 → XSS 로 탈취 불가),
-  `SameSite=Lax`, `Secure=COOKIE_SECURE`(.env), **`Path=/api/v1/auth`**(auth 경로에만 전송돼 CSRF 표면 최소화),
-  `Max-Age=REFRESH_TOKEN_EXPIRE_DAYS`(기본 14일).
+- **refresh 토큰**: JWT 가 **아니라** 불투명(opaque) 토큰 `"<session_id>.<urlsafe 무작위>"` 다. DB(`auth_sessions`)에는 **SHA-256 해시만** 저장한다 — DB 가 유출돼도 평문 토큰을 복원할 수 없고, 검증은 해시 재계산 + 상수시간 비교(`hmac.compare_digest`)다. refresh 토큰 1개 = `auth_sessions` 행 1개.
+- **즉시 무효화**: `get_current_user` 가 요청마다 `sid` 세션의 유효성(존재·미폐기·미만료)을 검사한다 — 로그아웃·강제 폐기가 access 토큰 만료를 기다리지 않고 **즉시 401** 로 반영된다. `sid` 가 없는 토큰도 401 이다.
+- 토큰은 `Authorization: Bearer <token>` 헤더. 검증 실패는 401 + `WWW-Authenticate: Bearer`.
 
-### `sessions` 테이블 (Alembic 0003)
+### 테이블 (Alembic)
 
-`id`, `user_id`(FK), `refresh_token_hash`(unique), `expires_at`, `created_at`, `last_used_at`, `revoked_at`.
+| 리비전 | 테이블 | 용도 |
+|--------|--------|------|
+| `0001_initial` | `app_meta` | 헬스체크(`/health/db`)용 메타 테이블 |
+| `0002_users` | `users` | 자체 계정 — `username`(unique)·`hashed_password`(bcrypt)·`role`(`user`/`admin`)·`is_active` |
+| `0003_auth_sessions` | `auth_sessions` | refresh 세션 — `id`(= refresh 토큰의 `<session_id>`·access 의 `sid`)·`user_id`(FK)·현재/직전 토큰 해시·`rotated_at`·`expires_at`(절대 수명)·`revoked_at` |
+| `0003_auth_sessions` | `login_throttles` | 계정(username)별 연속 로그인 실패 카운터·잠금 만료 시각 |
 
-### 엔드포인트
+컬럼의 SSOT 는 `app/models/`·`alembic/versions/` 다.
 
-- `POST /api/v1/auth/login` — 검증 성공 시 access(바디) + refresh(쿠키) 발급. **429 rate limit 적용**(아래).
-- `POST /api/v1/auth/refresh` — **회전(rotation)**: 기존 세션을 revoke 하고 새 refresh 를 재발급한다.
-  **revoke 된 토큰이 재사용되면 탈취로 간주**하고 그 사용자의 **모든 세션을 revoke** 한다(재사용 감지).
-- `POST /api/v1/auth/logout` — 204. 세션 revoke + 쿠키 삭제.
-- `GET /api/v1/auth/me` — 현재 사용자.
+### 엔드포인트 계약
 
-### 브루트포스 방어
+| 엔드포인트 | 요청 | 응답 |
+|------|------|------|
+| `POST /auth/login` | `{username, password}` | `TokenResponse` + refresh 쿠키 (성공 200 / 자격증명 오류 401 / 잠금 429) |
+| `POST /auth/refresh` | 본문 없음 — refresh 쿠키 | `TokenResponse` — **회전된 새 쌍**(쿠키도 교체). 실패는 원인 무관 401 **+ 쿠키 삭제** |
+| `POST /auth/logout` | 본문 없음 — refresh 쿠키 | **204 멱등·인증 불요** — 토큰 "소지"가 폐기 권한이다(해시 검증 후 폐기). 쿠키 유무·상태와 무관하게 항상 204 + 쿠키 삭제 |
+| `GET /auth/me` | Bearer access | `UserRead` |
 
-- 로그인 실패는 **(username, client IP)별 5분 창 5회** 를 넘으면 **429 + `Retry-After`**.
-- 카운터는 **인메모리**다 — **단일 프로세스 전제**. 다중 워커/다중 인스턴스 배포에서는 Redis 등 공유 저장소로 교체해야 한다.
+- `TokenResponse` 는 로그인·리프레시가 **동일 형태**다: `{access_token, refresh_token, token_type, expires_in, refresh_expires_in}`. 이 템플릿(cookie 모드)에서 `refresh_token` 은 **항상 `null`** 이다. `expires_in`/`refresh_expires_in` 은 절대 시각이 아니라 **"지금부터 남은 초"** 다 — 클라이언트가 서버와 시계를 맞출 필요 없이 갱신 시점을 계산한다.
 
-### 비밀번호 정책 (NIST 800-63B 권고 방식)
+### refresh 토큰 전달 방식 (`REFRESH_TOKEN_TRANSPORT`)
 
-- **최소 8자**, **UTF-8 72바이트 이하**(bcrypt 가 72바이트 초과분을 무시하는 한계 방어), **조합 규칙 없음**.
-- `create_user` 에서 강제한다.
+같은 백엔드 코드가 BFF 와 브라우저 SPA 를 모두 섬기도록 refresh 토큰의 운반 경로만 설정으로 바꾼다. 세션·회전·재사용 감지 로직은 동일하다.
 
-### SECRET_KEY · 초기 관리자
+| 모드 | 대상 | 동작 |
+|------|------|------|
+| `cookie` (**코드 기본값 · 이 템플릿**) | 브라우저 SPA (React·Nuxt·SvelteKit) | login/refresh 가 refresh 토큰을 **httpOnly 쿠키**로 심고 본문의 `refresh_token` 은 `null` 이다 — JS 가 refresh 토큰을 읽을 수 없다. refresh/logout 은 쿠키에서 읽고 본문은 보지 않는다. refresh 실패는 401 **+ 쿠키 삭제**, logout 은 항상 204 + 쿠키 삭제 |
+| `body` | BFF (Next.js 서버) | 요청·응답 JSON 본문으로 주고받고 쿠키를 쓰지 않는다. refresh/logout 본문은 필수(없으면 422). ⛔ 이 템플릿(브라우저 SPA)에서는 쓰지 않는다 — refresh 토큰이 JS 에 노출된다 |
 
-- `SECRET_KEY` 가 **32자 미만이거나 기본값이면 `Settings` 검증에서 기동을 거부**한다 — 약한 키로 서명된
-  JWT 는 오프라인 크래킹에 뚫리므로 실수로 운영에 나가는 것 자체를 막는다. 스캐폴드가 `.env` 에 랜덤 생성해 넣는다.
-- 초기 관리자는 `INITIAL_ADMIN_USERNAME`/`INITIAL_ADMIN_PASSWORD` 를 **`.env` 로 주입**한다(스캐폴드가 랜덤 생성해 출력).
-  미설정이면 시드를 건너뛴다. ⛔ **하드코딩 기본 계정(예: admin/admin123)은 금지** — 코드에 박힌 자격증명은
-  저장소를 보는 모두에게 노출되고, 배포마다 같은 값이라 스캔 공격의 첫 표적이 된다.
+- 쿠키 속성(cookie 모드): 이름 `refresh_token`, **`Path=/api/v1/auth`**(refresh/logout 에만 전송 — 일반 API 요청에는 실리지 않는다), **`HttpOnly`**(JS 접근 불가 → XSS 로 탈취 불가), `SameSite=Lax`, `Secure=COOKIE_SECURE`, `Max-Age` = 세션의 남은 절대 수명(`refresh_expires_in` 과 같은 값).
+- ⛔ `APP_ENV=production` + `cookie` 모드에서 `COOKIE_SECURE=false` 면 **기동을 거부**한다. 교차 출처 SPA 의 쿠키 갱신을 위해 CORS 는 `allow_credentials=True` 이며, 따라서 `CORS_ORIGINS` 에 출처를 명시한다(`*` 불가).
+- **회전(rotation)**: `/auth/refresh` 는 성공할 때마다 새 secret 으로 교체하고, 직전 해시를 `prev_token_hash` 에 보관한다. **재사용 감지** — 현재 해시도 직전 해시도 아니거나, 직전 해시이지만 회전(`rotated_at`) 후 `ROTATION_GRACE_SECONDS`(60초)가 지났으면 탈취 신호로 보고 **그 세션을 즉시 폐기**한다. 응답은 다른 실패와 동일한 401 이다 — 실패 사유(형식 오류/미존재/만료/폐기/재사용)를 응답으로 구분하지 않아 공격자가 토큰 상태를 탐침하지 못한다.
+- **동시 요청 유예(60초)**: 멀티 탭이 **같은 refresh 쿠키로 동시에** 갱신을 치는 것은 정상 상황이다 — 유예 없이 전부 재사용으로 판정하면 첫 요청만 이기고 나머지가 세션을 폐기해 사용자가 주기적으로 강제 로그아웃당한다. 그래서 직전 토큰은 회전 후 60초 동안만 정상 회전으로 받아 준다(이때 `prev_token_hash`·`rotated_at` 은 갱신하지 않는다 — 창이 슬라이딩하면 탈취된 이전 토큰이 무한히 살아남는다). 유예 내 이전 토큰 허용의 추가 노출은 실질 0 이다 — 그 토큰을 가진 공격자는 회전 전에도 같은 토큰을 쓸 수 있었다.
+- ⚠️ **회전해도 절대 수명은 연장되지 않는다** — `expires_at` 은 로그인 시점 + `REFRESH_TOKEN_EXPIRE_DAYS`(기본 14일)로 고정이다. 회전으로 세션이 무한히 살아남지 못한다.
 
-### 보안 응답 헤더 · CORS
+### 로그인 보호 (계정 존재 비노출 · 시도 제한)
 
-- 전 응답: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
-  `Referrer-Policy: strict-origin-when-cross-origin`, `Cross-Origin-Opener-Policy: same-origin`.
-  `COOKIE_SECURE=true` 이면 HSTS 추가. `/api/v1/auth` 응답은 `Cache-Control: no-store`.
-- CORS 는 필요한 메서드/헤더만 명시한다(`Authorization`, `Content-Type`).
+- **실패 메시지 통일**: 로그인 실패는 원인(자격증명 불일치/비활성 계정)과 무관하게 같은 문구·같은 401 이다. 미존재 계정에도 **더미 bcrypt 해시로 1회 검증**해 응답 시간(타이밍)으로도 존재 여부가 드러나지 않게 한다.
+- **로그인 스로틀**: 계정(username)별 DB 카운터(`login_throttles`). 연속 실패가 `LOGIN_MAX_FAILURES`(기본 5) 이상이면 `LOGIN_LOCKOUT_MINUTES`(기본 15분) 동안 **429** 로 거부한다. **미존재 계정도 행을 만들어 같은 429 를 받는다** — 잠금 응답 유무로도 계정 존재가 구분되지 않는다. 성공 시 스로틀 행은 삭제된다. DB 에 있으므로 다중 워커·다중 인스턴스에서도 공유된다. 429 응답에는 `Retry-After` 헤더가 없다(프론트는 일반 안내 문구만 보여준다, §14).
+- **감사 로그**: 보안 이벤트(로그인 성공/실패/잠금, refresh 회전/거부/재사용 감지, 로그아웃)는 전용 로거 **`app.audit`** 로 남긴다 — 일반 로그와 분리 수집할 수 있다. 원인 구분은 응답이 아니라 이 로그로만 한다.
+
+### 비밀번호 정책
+
+- **새로 저장하는 비밀번호**는 `validate_new_password()` 한 곳에서 통합 검증한다 — 최소 `PASSWORD_MIN_LENGTH`(8자) + `len(password.encode("utf-8")) <= 72` bytes(bcrypt 상한). 위반은 422 도메인 오류로 변환한다. 한글은 UTF-8에서 글자당 3 bytes이므로 문자 수 제한과 같지 않다. 조합 규칙은 두지 않는다(NIST 800-63B 권고 방식).
+- 하한(8자)은 "새 비밀번호를 만드는 규칙"이라 **로그인 검증에는 적용하지 않는다** — 기존 계정의 짧은 비밀번호로도 로그인은 된다. 상한(72 bytes)은 HTTP 입력(스키마)에서도 미리 걸러 절단 착시를 막고, `hash_password()`도 방어적으로 초과 시 `ValueError`를 발생시킨다.
+
+### SECRET_KEY · 초기 관리자 · `APP_ENV`
+
+- `SECRET_KEY` 가 공개된 기본값(`change-me-in-production-use-32-bytes`)이면 개발에서는 기동 **경고**, `APP_ENV=production` 에서는 **기동 실패**다(공개된 키라 토큰 위조가 가능하다). 32 bytes 미만이면 경고한다. 스캐폴드가 `.env` 에 랜덤 생성해 넣는다.
+- 기본 관리자(`admin`)는 `SEED_DEFAULT_ADMIN=true` + `DEFAULT_ADMIN_PASSWORD` 로 기동 시 시드한다. **코드 기본값은 꺼짐**이고, 스캐폴드가 개발용 `.env` 에서만 켜고 무작위 비밀번호를 넣어 출력한다. 비밀번호가 비어 있으면 시드를 건너뛰고 에러 로그를 남긴다. ⛔ **비밀번호 기본값·하드코딩 기본 계정(예: admin/admin123)은 금지** — 설정을 빠뜨린 모든 배포가 같은 자격증명을 갖게 된다. ⛔ `APP_ENV=production` 에서 `SEED_DEFAULT_ADMIN=true` 면 기동을 거부한다.
+
+### CORS · 응답 헤더
+
+- CORS 는 `allow_credentials=True` + `allow_methods/allow_headers=["*"]` 이고, 출처는 `CORS_ORIGINS` 에 명시한다(`*` 불가).
+- 백엔드는 보안 응답 헤더(`X-Frame-Options`·HSTS 등)나 `Cache-Control: no-store` 를 붙이지 않는다 — 필요하면 프론트 정적 호스팅·리버스 프록시(nginx 등)에서 설정한다.
 
 ### 배포 전제 (same-site)
 
@@ -429,6 +458,16 @@ class Order(Base):
 
 - 백엔드가 authorize→callback→userinfo 처리 후 앱 세션 JWT 발급, `python-jose`.
 - 최초 로그인 시 `provision_from_userinfo()`로 사용자 upsert(없으면 생성, 식별정보 갱신).
+
+### 응답 보안 헤더 · 캐시 금지 · CORS
+
+백엔드는 모든 응답에 `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Cross-Origin-Opener-Policy: same-origin` 을 붙인다(`app/main.py` 보안 헤더 미들웨어 — CORS 바깥에서 감싸 preflight·오류 응답에도 적용).
+HSTS(`max-age=31536000`)는 `COOKIE_SECURE=true` 이거나 `APP_ENV=production` 일 때만 보낸다 — body 모드(BFF) 운영은 `COOKIE_SECURE` 를 켜지 않을 수 있어 production 도 조건에 넣었고, 브라우저는 평문 HTTP 로 받은 HSTS 를 무시하므로 TLS 종단이 앞단 프록시여도 무해하다.
+CSP 는 `/docs`·`/redoc` 의 CDN·인라인 스크립트를 막으므로 백엔드에서 붙이지 않고 프론트엔드(정적 호스팅/BFF) 쪽 책임으로 둔다.
+
+- `/api/v1/auth/*` 응답은 성공·오류(401/422/429)·쿠키 삭제 응답을 가리지 않고 `Cache-Control: no-store` 다.
+- 로그인 잠금 429 는 `Retry-After`(남은 잠금 초, 올림·최소 1)를 싣는다. 미존재 계정도 같은 스로틀 행을 거쳐 같은 헤더를 받으므로 계정 존재가 드러나지 않는다.
+- CORS 는 `CORS_ORIGINS` 의 출처만 허용하고 `allow_credentials=True`(cookie 모드 refresh 쿠키 전송)를 유지하되, 메서드는 `GET·POST·PUT·PATCH·DELETE·OPTIONS`, 요청 헤더는 `Authorization·Content-Type` 만 명시 허용하며 `Retry-After` 를 expose 한다. 새 커스텀 요청 헤더가 필요하면 `app/main.py` 의 `CORS_ALLOW_HEADERS` 에 추가한다.
 
 ---
 
@@ -472,8 +511,11 @@ class Order(Base):
 - DB는 **SQLite in-memory**, 테스트마다 `Base.metadata.create_all/drop_all`.
 - `conftest.py`에 공통 픽스처:
   - `_clear_settings_cache` (autouse): `get_settings.cache_clear()`.
-  - `db_session`, `client`(`app.dependency_overrides[get_db]` 오버라이드).
-  - 인증 통과용 `auth_client`/`admin_client` (현재 사용자 의존성 오버라이드).
+  - `db_session_factory`: 테스트 엔진에 바인딩된 세션 팩토리.
+  - `db_session`: 테스트별 DB 세션.
+  - `client`: `app.dependency_overrides[get_db]`를 적용한 기본 API 클라이언트(conftest 는 `REFRESH_TOKEN_TRANSPORT=body` 로 고정).
+  - `lifespan_client`: 기동·종료 훅과 기본 관리자 시드·경고를 검증하는 클라이언트.
+- skeleton 의 인증 회귀는 `tests/test_auth.py`(로그인·`/auth/me`·`sid`), **`tests/test_auth_sessions.py`**(refresh 회전·재사용 감지 시 세션 폐기·동시 갱신 60초 유예·절대 수명 비연장·로그아웃 멱등·즉시 무효화·로그인 스로틀·비밀번호 정책), **`tests/test_auth_cookie_transport.py`**(이 템플릿이 쓰는 cookie 모드 — 쿠키 속성·회전·삭제·429·production 기동 거부)가 고정한다(§9).
 
 ```python
 @pytest.fixture(autouse=True)
@@ -690,12 +732,17 @@ export function useLogin() {
   털리는 저장소다. refresh 토큰은 **HttpOnly 쿠키**라 JS 에서 아예 보이지 않고, 브라우저가 알아서
   `/api/v1/auth/*` 요청에만 실어 보낸다(§9).
 - **로그인**: `POST /api/v1/auth/login` 성공 → 바디의 access 토큰을 `auth.setSession(token)` 으로 메모리에 넣고
-  (refresh 쿠키는 응답의 `Set-Cookie` 로 자동 저장), `setUser(await getMe())` 로 사용자 로드 → 홈 이동.
+  (refresh 쿠키는 응답의 `Set-Cookie` 로 자동 저장, 바디의 `refresh_token` 은 항상 `null`), `setUser(await getMe())` 로 사용자 로드 → 홈 이동.
+  실패 문구는 상태 코드로 고른다 — 401 "아이디 또는 비밀번호가 올바르지 않습니다", **429 = 계정 잠금**
+  (`LOGIN_MAX_FAILURES` 회 연속 실패 시 `LOGIN_LOCKOUT_MINUTES` 동안, §9) "로그인 시도가 너무 많습니다…".
+  429 에는 `Retry-After` 가 없으므로 남은 시간을 계산·표시하지 않는다(`composables/useAuth.ts` 의 `useLogin`).
 - **세션 복원(새로고침 대응)**: 메모리 토큰은 새로고침에 날아간다 → **`app/plugins/auth-init.ts`** 가 앱 부팅 시
   `POST /api/v1/auth/refresh` 를 한 번 호출해 쿠키가 살아 있으면 access 토큰을 재발급받는다(없으면 미인증으로 시작).
 - **401 처리**: `$api` 가 401 을 받으면 **refresh 1회(single-flight) 후 원 요청을 재시도**하고,
   refresh 도 실패하면 세션을 비우고 `/login` 으로 보낸다(§13). ⛔ 개별 컴포넌트에서 401 을 따로 처리하지 않는다.
-- **로그아웃**: `POST /api/v1/auth/logout`(서버가 세션 revoke + 쿠키 삭제) → `auth.clearSession()` → `/login`.
+- **로그아웃**: `POST /api/v1/auth/logout`(서버가 세션 revoke + 쿠키 삭제, 항상 204) → `auth.logout()`(메모리 비우기) → `/login`.
+  세션이 폐기되면 그 세션의 access 토큰도 `sid` 검사로 **즉시 401** 이 된다 — 다른 탭의 메모리 토큰도 다음 요청에서
+  401 → refresh 실패(쿠키 삭제됨) → `/login` 으로 정리된다.
 - **보호 라우트**: `app/middleware/auth.ts` 라우트 미들웨어가 담당한다(미인증 시 `navigateTo('/login', { replace: true })`).
   보호할 페이지마다 `definePageMeta({ middleware: 'auth' })` 한 줄을 선언한다 — 파일 위치를 옮길 필요가 없다.
 - **SSO(선택)**: `app/pages/login.vue`에서 `window.location.href = ${config.public.backendUrl}/api/v1/auth/login`,
@@ -785,18 +832,20 @@ const isLoading = computed(() => healthStatus.value === "idle" || healthStatus.v
 
 > 모든 설정은 **`.env` 파일로 OS 독립적으로 주입**한다(강제 규칙은 §5 참조). 셸 환경변수에 의존하지 않는다.
 
-### 백엔드 (`.env`)
+### 백엔드 (`backend/.env`)
 | 키 | 용도 |
 |----|------|
-| `DATABASE_URL` | PostgreSQL 연결 (또는 `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME`) |
-| `SECRET_KEY` | access JWT 서명 — **32자 이상 필수, 기본값이면 기동 거부**(§9). 스캐폴드가 랜덤 생성 |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | access JWT 만료(분). 기본 `15` |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | refresh 세션·쿠키 만료(일). 기본 `14` |
-| `COOKIE_SECURE` | refresh 쿠키 `Secure` 속성. 로컬 `false`, 운영(HTTPS) `true` — `true` 면 HSTS 도 켜진다(§9) |
-| `INITIAL_ADMIN_USERNAME` / `INITIAL_ADMIN_PASSWORD` | 초기 관리자 시드(§9). 스캐폴드가 랜덤 생성해 주입, 미설정이면 시드 스킵 |
+| `DATABASE_URL` | PostgreSQL 연결 — 단일 지원(개별 `DB_*` 키 미지원), 미설정 시 기동에서 fail-fast |
+| `SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES` | 토큰 서명키, access 토큰 만료(분, 기본 15). 스캐폴드가 키를 랜덤 생성 |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | refresh 세션 절대 수명(일, 기본 14) — 회전해도 연장되지 않는다(§9) |
+| `LOGIN_MAX_FAILURES`, `LOGIN_LOCKOUT_MINUTES` | 로그인 시도 제한 — 계정별 연속 실패 임계치(기본 5)와 잠금 시간(분, 기본 15) (§9) |
+| `REFRESH_TOKEN_TRANSPORT` | refresh 토큰 전달 방식 — `cookie`(브라우저 SPA: 백엔드가 httpOnly 쿠키 설정, 코드 기본값) / `body`(BFF: JSON 본문). 이 템플릿은 `cookie` (§9) |
+| `COOKIE_SECURE` | refresh 쿠키의 `Secure` 속성. 로컬 `false`, 운영(HTTPS) `true` — cookie 방식 + `APP_ENV=production` 이면 `true` 필수(아니면 기동 거부) |
 | `CORS_ORIGINS` | 콤마 구분 허용 출처 |
 | `FRONTEND_URL`, `BACKEND_PUBLIC_URL` | 리다이렉트/콜백 |
-| `OAUTH_*` | SSO(authorize/token/userinfo URL, client id/secret, redirect uri) |
+| `APP_ENV` | `production` 이면 안전하지 않은 기본값(기본 `SECRET_KEY`, 관리자 시드, Secure 없는 refresh 쿠키)으로 기동을 거부한다 |
+| `SEED_DEFAULT_ADMIN`, `DEFAULT_ADMIN_PASSWORD` | 기동 시 기본 관리자(admin) 시드 여부·초기 비밀번호. **코드 기본값은 꺼짐** — `.env` 에서만 켠다(스캐폴드가 무작위 비밀번호로 켜 준다, §9) |
+| `OAUTH_*` | SSO 도입 시(authorize/token/userinfo URL, client id/secret, redirect uri) |
 | `TZ` | 실행 환경 `Asia/Seoul` |
 
 ### 프론트엔드 (`.env`, `NUXT_PUBLIC_` 필수)
@@ -922,3 +971,12 @@ gh pr merge --squash --delete-branch
 - [ ] `.github/workflows/ci.yml` 동작 확인 — push 이후 도는 **사후 안전망**이다. push 전 로컬 검증이 유일한 게이트 (§20)
 - [ ] (협업자가 생기면) `.github/pull_request_template.md` 활용, `main` 보호 + CI 필수 검사 설정 (§20)
 - [ ] 첫 실패 테스트 작성(TDD Red) → 구현(Green) (§18)
+
+### 배포 전 체크리스트 (스타터 기본값 제거 — MUST)
+
+skeleton 은 개발 편의를 위해 기본 관리자 계정을 자동 시드한다. **운영 배포 전 반드시 제거·변경한다.**
+
+- [ ] `SECRET_KEY` 를 무작위 값으로 교체 — 기본값이면 개발에서는 경고, `APP_ENV=production` 에서는 **기동 실패**다 (§9)
+- [ ] `APP_ENV=production` 설정 — 기본 `SECRET_KEY`·관리자 시드·`COOKIE_SECURE=false`(cookie 모드)면 기동이 실패한다 (§17)
+- [ ] 기본 관리자 시드 정리 — 운영 `backend/.env`에서 `SEED_DEFAULT_ADMIN=false`, 시드된 admin 비밀번호 변경 (§9)
+- [ ] HTTPS 뒤에서 `COOKIE_SECURE=true` 로 refresh 쿠키가 `Secure` 로 나가는지 확인 (§9)

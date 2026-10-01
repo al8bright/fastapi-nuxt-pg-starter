@@ -93,13 +93,15 @@ pnpm dev
 
 스캐폴드에는 자체 계정(username/password) 로그인 플로우가 내장돼 있다:
 
-- 초기 관리자는 **`backend/.env` 의 `INITIAL_ADMIN_USERNAME` / `INITIAL_ADMIN_PASSWORD`** 로 시드된다(없을 때만, lifespan 시드).
-  스캐폴드가 비밀번호를 **랜덤 생성해 `backend/.env` 에 기록**하므로 거기서 확인한다. 미설정이면 시드를 건너뛴다.
-  하드코딩 기본 계정(admin/admin123 류)은 없다.
-- 로그인하면 **access JWT(15분, 메모리)** 와 **refresh HttpOnly 쿠키(DB `sessions`, 회전)** 가 발급된다 — 상세는 `ARCHITECTURE.md` §9·§14.
+- 기본 관리자(아이디 `admin`)는 **`backend/.env` 의 `SEED_DEFAULT_ADMIN=true` + `DEFAULT_ADMIN_PASSWORD`** 로 기동 시 시드된다(없을 때만, lifespan 시드).
+  스캐폴드가 비밀번호를 **랜덤 생성해 `backend/.env` 에 기록**하고 마지막에 출력하므로 거기서 확인한다. 코드 기본값은 시드 꺼짐이고
+  비밀번호 기본값은 없다(하드코딩 기본 계정 admin/admin123 류 없음). ⛔ 배포 전 `SEED_DEFAULT_ADMIN=false`, `APP_ENV=production`.
+- 로그인하면 **access JWT(15분, 메모리, `sid` 클레임)** 와 **refresh HttpOnly 쿠키(`refresh_token`, `Path=/api/v1/auth`, DB `auth_sessions`, 회전)** 가
+  발급된다(`REFRESH_TOKEN_TRANSPORT=cookie` — 응답 본문의 `refresh_token` 은 `null`). 로그아웃하면 세션이 폐기돼 access 토큰도 즉시 401 이 된다.
+  상세는 `ARCHITECTURE.md` §9·§14.
 - 흐름: **미인증 → `/login`** → 로그인 성공 → **메인(`/`)** → 랜딩(`/landing`, 시스템 상태) / **My(`/my`, 내 정보·로그아웃)**.
 - `users` 테이블은 `role`(일반 `user` / 관리자 `admin`)로 권한을 구분한다. 관리자 전용 API 는 `require_admin` 의존성으로 보호한다.
-- ⚠️ 로그인 브루트포스 방어(429)는 **인메모리 카운터(단일 프로세스 전제)** 다 — 다중 워커 배포는 Redis 등으로 교체한다(§9).
+- 로그인 브루트포스 방어(429)는 **DB `login_throttles`** 의 계정별 잠금이다 — 연속 `LOGIN_MAX_FAILURES`(5)회 실패 시 `LOGIN_LOCKOUT_MINUTES`(15)분 잠금, 다중 워커에서도 공유된다(§9).
 
 ## DB 스키마 변경 (ARCHITECTURE.md §11)
 

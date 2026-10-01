@@ -331,7 +331,8 @@ $_secBytes = [byte[]]::new(24)
 $_rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 try { $_rng.GetBytes($_secBytes) } finally { $_rng.Dispose() }
 $secret = -join ($_secBytes | ForEach-Object { $_.ToString('x2') })
-# 초기 관리자 비밀번호도 같은 CSPRNG 방식으로 생성한다 (12바이트 hex — 로그인 후 변경 권고).
+# 초기 관리자 비밀번호(DEFAULT_ADMIN_PASSWORD)도 같은 CSPRNG 방식으로 생성한다 (12바이트 hex = 24자, bcrypt 72 bytes 상한 이내).
+# ⛔ 하드코딩된 기본값(admin123)을 쓰면 이 템플릿으로 만든 모든 프로젝트가 같은 자격증명을 갖는다.
 $_admBytes = [byte[]]::new(12)
 $_rng2 = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 try { $_rng2.GetBytes($_admBytes) } finally { $_rng2.Dispose() }
@@ -340,19 +341,19 @@ $adminPassword = -join ($_admBytes | ForEach-Object { $_.ToString('x2') })
 # ---------- 2. 골격 복사 ----------
 Write-Step "골격 복사 → $Target"
 New-Item -ItemType Directory -Force -Path $Target | Out-Null
-Copy-Item -Path (Join-Path $SkeletonDir '*') -Destination $Target -Recurse -Force
-# 안전장치: 닷파일 누락 시 보강
-foreach ($dot in '.gitignore', '.gitattributes') {
-  $src = Join-Path $SkeletonDir $dot
-  $dst = Join-Path $Target $dot
-  if ((Test-Path $src) -and (-not (Test-Path $dst))) { Copy-Item $src $dst -Force }
-}
-# 안전장치: .claude (스킬/지침 디렉토리) 누락 시 재귀 보강
-$claudeSrc = Join-Path $SkeletonDir '.claude'
-$claudeDst = Join-Path $Target '.claude'
-if ((Test-Path $claudeSrc) -and (-not (Test-Path $claudeDst))) {
-  Copy-Item $claudeSrc $claudeDst -Recurse -Force
-}
+# 닷파일(.gitignore·.gitattributes·.python-version·.nvmrc·.github·.claude 등) 포함 전체 복사.
+# robocopy 는 숨김 속성 항목도 복사하므로 과거의 닷파일·.claude 누락 보강 단계는 필요 없다.
+# ⛔ Copy-Item 통째 복사는 쓰지 않는다 — 템플릿 저장소에서 개발/검증을 하면 skeleton\ 안에
+#    node_modules(수백 MB)·.venv·.nuxt·.output 같은 gitignore 산출물이 남는데, 그대로 복사되면
+#    생성 프로젝트가 수백 MB 로 부풀고 토큰 치환이 빌드 산출물을 붙잡는다. 복사된 node_modules 는
+#    다른 경로에서 만든 것이라 생성 프로젝트의 pnpm install 이 비대화형에서
+#    ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY 로 중단되기도 한다. 실제 .env 가 복사되면
+#    템플릿의 SECRET_KEY 가 새는 보안 문제도 된다 (scaffold.sh 의 tar --exclude 와 동일 결과).
+#    robocopy 는 Windows 기본 탑재이고 /XD·/XF 로 디렉터리·파일을 원천 제외한다.
+$_xd = 'node_modules', '.venv', '.nuxt', '.output', '.ruff_cache', '.pytest_cache', '__pycache__'
+robocopy $SkeletonDir $Target /E /XD $_xd /XF '.DS_Store' '.env' /NFL /NDL /NJH /NJS /NP | Out-Null
+# robocopy 종료 코드: 0~7 = 성공(복사 결과 비트마스크), 8 이상 = 실패
+if ($LASTEXITCODE -ge 8) { Write-Warn2 "골격 복사 실패 (robocopy 코드 $LASTEXITCODE) — 중단합니다"; exit 1 }
 # bootstrap 이 실제로 설치·고정한 런타임 버전을 생성 프로젝트에 반영 (골격의 값은 덮어쓴다)
 if ($_PinDir) {
   foreach ($pin in '.python-version', '.nvmrc') {
@@ -367,7 +368,12 @@ Write-Ok "복사 완료"
 Write-Step "토큰 치환"
 $inc = '*.ts','*.vue','*.py','*.css','*.html','*.json','*.md','*.ini','*.mako','*.js','*.example','*.txt'
 # -Force: 숨김 속성/닷 디렉토리(.claude, .github) 하위 파일도 치환 대상에 포함시킨다.
-$files = Get-ChildItem -Path $Target -Recurse -File -Force -Include $inc
+# 복사 단계가 산출물을 제외하지만, 기존 디렉토리 위에 덮어쓴 재실행(이미 install/build 된
+# 프로젝트)에서는 node_modules·.nuxt·.output 등이 남아 있다 — 여기서도 걸러야 빌드 산출물을
+# 문자열 치환이 붙잡지 않는다(방어 이중화, scaffold.sh 의 find -prune 과 동일).
+# 대상 경로 자체(예: C:\build\MyApp)에 같은 이름이 있어도 오탐하지 않도록 $Target 기준 상대 경로로 비교한다.
+$files = Get-ChildItem -Path $Target -Recurse -File -Force -Include $inc |
+  Where-Object { ('\' + $_.FullName.Substring($Target.Length)) -notmatch '[\\/](node_modules|\.venv|\.nuxt|\.output|\.ruff_cache|\.pytest_cache|__pycache__|\.git)[\\/]' }
 foreach ($f in $files) {
   $t = [System.IO.File]::ReadAllText($f.FullName)
   $o = $t
@@ -382,16 +388,47 @@ $backendEnv = @"
 DATABASE_URL=$databaseUrl
 SECRET_KEY=$secret
 ACCESS_TOKEN_EXPIRE_MINUTES=15
+# 인증 세션·로그인 스로틀 (ARCHITECTURE.md §9) — 코드 기본값과 같지만, 운영자가 .env 만 보고도
+# 조절 지점을 알 수 있도록 명시한다.
 REFRESH_TOKEN_EXPIRE_DAYS=14
+LOGIN_MAX_FAILURES=5
+LOGIN_LOCKOUT_MINUTES=15
+# refresh 토큰 전달 방식 — 이 템플릿(Nuxt 브라우저 SPA)은 백엔드가 심는 httpOnly 쿠키(path=/api/v1/auth)를 쓴다.
+# 코드 기본값도 cookie 지만, 운영자가 .env 만 보고도 알 수 있도록 명시한다.
+REFRESH_TOKEN_TRANSPORT=cookie
+# refresh 쿠키 Secure 속성 — HTTPS 운영에서는 true (APP_ENV=production + cookie 모드에서 false 면 기동 거부).
 COOKIE_SECURE=false
-INITIAL_ADMIN_USERNAME=admin
-INITIAL_ADMIN_PASSWORD=$adminPassword
 CORS_ORIGINS=http://localhost:5173
 FRONTEND_URL=http://localhost:5173
 BACKEND_PUBLIC_URL=http://localhost:8000
 TZ=Asia/Seoul
+APP_ENV=development
+# 초기 관리자 시드 — 코드 기본값은 꺼져 있고(backend/app/config.py) 개발 편의를 위해 여기서만 켠다.
+# ⛔ 배포 전 SEED_DEFAULT_ADMIN=false 로 끄고 APP_ENV=production 으로 바꾼다.
+SEED_DEFAULT_ADMIN=true
+DEFAULT_ADMIN_PASSWORD=$adminPassword
 "@
-[System.IO.File]::WriteAllText((Join-Path $Target 'backend\.env'), $backendEnv, $Enc)
+# ⛔ .env 는 DB 비밀번호와 JWT 서명키를 담는다. 상속 ACL 을 끊고 현재 사용자에게만 허용한다
+#    (scaffold.sh 의 chmod 600 대응).
+$_backendEnvPath = Join-Path $Target 'backend\.env'
+# ⛔ 기존 .env 를 덮어쓰면 SECRET_KEY 가 재발급되어 발급된 JWT 가 전부 무효가 된다. 백업을 남긴다.
+if (Test-Path $_backendEnvPath) {
+  $_envBak = "$_backendEnvPath.bak." + (Get-Date -Format 'yyyyMMddHHmmss')
+  Copy-Item $_backendEnvPath $_envBak -Force
+  Write-Warn2 "기존 backend\.env 를 백업했습니다: $(Split-Path $_envBak -Leaf)"
+}
+[System.IO.File]::WriteAllText($_backendEnvPath, $backendEnv, $Enc)
+try {
+  $_acl = Get-Acl $_backendEnvPath
+  $_acl.SetAccessRuleProtection($true, $false)
+  # 열거 중 컬렉션을 수정하지 않도록 스냅샷(@())을 뜬 뒤 제거한다
+  @($_acl.Access) | ForEach-Object { [void]$_acl.RemoveAccessRule($_) }
+  [void]$_acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, 'FullControl', 'Allow')))
+  Set-Acl -Path $_backendEnvPath -AclObject $_acl
+} catch {
+  Write-Warn2 "backend\.env 권한 설정 실패 — 파일 접근 권한을 직접 제한하세요: $($_.Exception.Message)"
+}
 $frontendEnv = "NUXT_PUBLIC_API_BASE_URL=`nNUXT_PUBLIC_BACKEND_URL=http://localhost:8000`n"
 [System.IO.File]::WriteAllText((Join-Path $Target 'frontend\.env'), $frontendEnv, $Enc)
 Write-Ok "backend\.env, frontend\.env 생성 (DATABASE_URL, SECRET_KEY, 초기 관리자 비밀번호 주입)"
@@ -484,10 +521,10 @@ Write-Host @"
 [확인]    브라우저: http://localhost:5173
           → '백엔드 API'와 '데이터베이스'가 모두 '정상'이면 성공입니다.
 
-[관리자]  초기 관리자 계정 (backend\.env 의 INITIAL_ADMIN_* 에 저장됨):
+[관리자]  초기 관리자 계정 (backend\.env 의 DEFAULT_ADMIN_PASSWORD):
   아이디: admin
   비밀번호: $adminPassword
-  → 첫 로그인 후 반드시 비밀번호를 변경하세요.
+  ⛔ 배포 전 이 계정의 비밀번호를 바꾸고 SEED_DEFAULT_ADMIN=false, APP_ENV=production 으로 설정하세요.
 
 [DB 변경] 모델 수정 시 (ARCHITECTURE.md §11):
   cd "$backend"

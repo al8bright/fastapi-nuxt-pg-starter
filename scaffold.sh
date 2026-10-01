@@ -287,19 +287,33 @@ if [ $SKIP_DB -eq 0 ]; then
   fi
 fi
 DATABASE_URL="postgresql+psycopg2://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
-# SECRET_KEY 는 32자 미만이면 백엔드 Settings 검증이 기동을 거부한다 — 약한 폴백을 두지 않고
-# CSPRNG 이 없으면 여기서 중단한다 (python3 은 어차피 백엔드 실행에 필수다).
+# SECRET_KEY 는 JWT 서명키다 — 약한 폴백(공개 기본값·짧은 키)을 두지 않고 CSPRNG 이 없으면
+# 여기서 중단한다 (python3 은 어차피 백엔드 실행에 필수다).
 if command -v openssl >/dev/null 2>&1; then SECRET=$(openssl rand -hex 24)
 elif command -v python3 >/dev/null 2>&1; then SECRET=$(python3 -c 'import secrets;print(secrets.token_hex(24))')
 else warn "SECRET_KEY 생성에 openssl 또는 python3 이 필요합니다."; exit 1; fi
-# 초기 관리자 비밀번호 (CSPRNG 12바이트 hex — 로그인 후 변경 권고)
+# 초기 관리자 비밀번호(DEFAULT_ADMIN_PASSWORD) — CSPRNG 12바이트 hex = 24자, bcrypt 72 bytes 상한 이내.
+# ⛔ 하드코딩된 기본값(admin123)을 쓰면 이 템플릿으로 만든 모든 프로젝트가 같은 자격증명을 갖는다.
 if command -v openssl >/dev/null 2>&1; then ADMIN_PASSWORD=$(openssl rand -hex 12)
 else ADMIN_PASSWORD=$(python3 -c 'import secrets;print(secrets.token_hex(12))'); fi
 
 # ---------- 2. 복사 ----------
 step "골격 복사 → $TARGET"
 mkdir -p "$TARGET"
-cp -R "$SKELETON_DIR/." "$TARGET/"
+# ⛔ cp -R 로 통째 복사하지 않는다 — 템플릿 저장소에서 개발/검증을 하면 skeleton/ 안에
+#    node_modules(수백 MB)·.venv·.nuxt·.output 같은 gitignore 산출물이 남는데, 그대로 복사되면
+#    생성 프로젝트가 수백 MB 로 부풀고 아래 토큰 치환이 빌드 산출물을 붙잡고 사실상 멈춘다.
+#    복사된 node_modules 는 생성 프로젝트의 pnpm install 을 비대화형에서
+#    ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY 로 중단시키기도 한다.
+#    실제 .env 가 복사되면 템플릿의 SECRET_KEY 가 새 프로젝트로 새는 보안 문제도 된다.
+#    tar 는 GNU/bsdtar 모두 --exclude 를 지원하므로 산출물·비밀을 원천 제외하고 복사한다.
+_COPY_EXCLUDES="node_modules .venv .nuxt .output .ruff_cache .pytest_cache __pycache__ .DS_Store .env"
+_tar_ex=""
+for _e in $_COPY_EXCLUDES; do _tar_ex="$_tar_ex --exclude $_e"; done
+# shellcheck disable=SC2086  # $_tar_ex 는 공백으로 나뉘어야 하는 옵션 나열이다
+if ! (cd "$SKELETON_DIR" && tar cf - $_tar_ex .) | (cd "$TARGET" && tar xf -); then
+  warn "골격 복사 실패 (권한/디스크 확인) — 중단합니다"; exit 1
+fi
 # bootstrap 이 실제로 설치·고정한 런타임 버전을 생성 프로젝트에 반영 (골격의 값은 덮어쓴다)
 if [ -n "$_PIN_DIR" ]; then
   for _pin in .python-version .nvmrc; do
@@ -319,28 +333,51 @@ replace_tokens() {
   content=${content//__THEME_CSS__/$THEME}
   printf '%s' "$content" > "$f"
 }
+# 복사 단계가 산출물을 제외하지만, 기존 디렉토리 위에 덮어쓴 재실행(이미 install/build 된
+# 프로젝트)에서는 node_modules·.nuxt·.output 등이 남아 있다 — 여기서도 걸러야 한다(방어 이중화).
+# -mindepth 1: 대상 경로 자체가 같은 이름이어도 통째로 prune 되지 않게 한다.
 while IFS= read -r -d '' f; do replace_tokens "$f"; done < <(
-  find "$TARGET" -type f \( -name '*.ts' -o -name '*.vue' -o -name '*.py' -o -name '*.css' \
+  find "$TARGET" -mindepth 1 \( -name node_modules -o -name .venv -o -name .nuxt -o -name .output \
+    -o -name .ruff_cache -o -name .pytest_cache -o -name __pycache__ -o -name .git \) -prune -o -type f \( -name '*.ts' -o -name '*.vue' -o -name '*.py' -o -name '*.css' \
     -o -name '*.html' -o -name '*.json' -o -name '*.md' -o -name '*.ini' -o -name '*.mako' \
     -o -name '*.js' -o -name '*.example' -o -name '*.txt' \) -print0 )
 ok "치환 완료"
 
 # ---------- 4. .env ----------
 step ".env 생성 (OS 무관 주입 — ARCHITECTURE.md §5)"
-cat > "$TARGET/backend/.env" <<EOF
+# ⛔ 기존 .env 를 덮어쓰면 SECRET_KEY 가 재발급되어 발급된 JWT 가 전부 무효가 된다. 백업을 남긴다.
+if [ -f "$TARGET/backend/.env" ]; then
+  _env_bak="$TARGET/backend/.env.bak.$(date +%Y%m%d%H%M%S)"
+  cp "$TARGET/backend/.env" "$_env_bak" && warn "기존 backend/.env 를 백업했습니다: $(basename "$_env_bak")"
+fi
+cat > "$TARGET/backend/.env" <<EOF || { warn "backend/.env 생성 실패 — 중단합니다"; exit 1; }
 DATABASE_URL=$DATABASE_URL
 SECRET_KEY=$SECRET
 ACCESS_TOKEN_EXPIRE_MINUTES=15
+# 인증 세션·로그인 스로틀 (ARCHITECTURE.md §9) — 코드 기본값과 같지만, 운영자가 .env 만 보고도
+# 조절 지점을 알 수 있도록 명시한다.
 REFRESH_TOKEN_EXPIRE_DAYS=14
+LOGIN_MAX_FAILURES=5
+LOGIN_LOCKOUT_MINUTES=15
+# refresh 토큰 전달 방식 — 이 템플릿(Nuxt 브라우저 SPA)은 백엔드가 심는 httpOnly 쿠키(path=/api/v1/auth)를 쓴다.
+# 코드 기본값도 cookie 지만, 운영자가 .env 만 보고도 알 수 있도록 명시한다.
+REFRESH_TOKEN_TRANSPORT=cookie
+# refresh 쿠키 Secure 속성 — HTTPS 운영에서는 true (APP_ENV=production + cookie 모드에서 false 면 기동 거부).
 COOKIE_SECURE=false
-INITIAL_ADMIN_USERNAME=admin
-INITIAL_ADMIN_PASSWORD=$ADMIN_PASSWORD
 CORS_ORIGINS=http://localhost:5173
 FRONTEND_URL=http://localhost:5173
 BACKEND_PUBLIC_URL=http://localhost:8000
 TZ=Asia/Seoul
+APP_ENV=development
+# 초기 관리자 시드 — 코드 기본값은 꺼져 있고(backend/app/config.py) 개발 편의를 위해 여기서만 켠다.
+# ⛔ 배포 전 SEED_DEFAULT_ADMIN=false 로 끄고 APP_ENV=production 으로 바꾼다.
+SEED_DEFAULT_ADMIN=true
+DEFAULT_ADMIN_PASSWORD=$ADMIN_PASSWORD
 EOF
-printf 'NUXT_PUBLIC_API_BASE_URL=\nNUXT_PUBLIC_BACKEND_URL=http://localhost:8000\n' > "$TARGET/frontend/.env"
+# ⛔ .env 는 DB 비밀번호와 JWT 서명키를 담는다 — 소유자만 읽고 쓰게 한다.
+chmod 600 "$TARGET/backend/.env" 2>/dev/null || warn "backend/.env 권한 설정 실패 — 수동으로 chmod 600 하세요"
+printf 'NUXT_PUBLIC_API_BASE_URL=\nNUXT_PUBLIC_BACKEND_URL=http://localhost:8000\n' > "$TARGET/frontend/.env" \
+  || { warn "frontend/.env 생성 실패 — 중단합니다"; exit 1; }
 ok "backend/.env, frontend/.env 생성 (DATABASE_URL, SECRET_KEY, 초기 관리자 비밀번호 주입)"
 
 BACKEND="$TARGET/backend"
@@ -406,10 +443,10 @@ cat <<EOF
 [확인]    브라우저: http://localhost:5173
           → '백엔드 API'와 '데이터베이스'가 모두 '정상'이면 성공입니다.
 
-[관리자]  초기 관리자 계정 (backend/.env 의 INITIAL_ADMIN_* 에 저장됨):
+[관리자]  초기 관리자 계정 (backend/.env 의 DEFAULT_ADMIN_PASSWORD):
   아이디: admin
   비밀번호: $ADMIN_PASSWORD
-  → 첫 로그인 후 반드시 비밀번호를 변경하세요.
+  ⛔ 배포 전 이 계정의 비밀번호를 바꾸고 SEED_DEFAULT_ADMIN=false, APP_ENV=production 으로 설정하세요.
 
 [DB 변경] 모델 수정 시 (ARCHITECTURE.md §11):
   cd "$BACKEND"

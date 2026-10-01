@@ -5,6 +5,76 @@
 
 ---
 
+## 2026-10-02 — 백엔드 보안 보강 (네 템플릿 공통)
+
+### Added (추가)
+
+- **보안 응답 헤더** — 모든 응답에 `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Cross-Origin-Opener-Policy: same-origin`. HSTS(`max-age=31536000`)는 `COOKIE_SECURE=true` 또는 `APP_ENV=production` 일 때만 보낸다.
+- **`/api/v1/auth/*` 캐시 금지** — 성공·401/422/429·쿠키 삭제 응답 모두 `Cache-Control: no-store`.
+- **로그인 잠금 429 의 `Retry-After`** — 남은 잠금 초(올림·최소 1). 미존재 계정도 동일하게 받아 계정 존재가 드러나지 않는다.
+- `tests/test_security.py` 24건.
+
+### Changed (변경)
+
+- CORS `allow_methods`/`allow_headers` 를 `"*"` 에서 명시 목록(`GET·POST·PUT·PATCH·DELETE·OPTIONS` / `Authorization·Content-Type`)으로 좁히고 `Retry-After` 를 expose 한다.
+- CSP 는 `/docs`·`/redoc` 을 깨뜨리므로 백엔드에서 붙이지 않는다(프론트엔드 호스팅 책임). `ARCHITECTURE.md` §9 에 정리했다.
+
+## 2026-10-02 — 백엔드를 공통(canonical) 백엔드로 교체 — DB 세션·로그인 스로틀·refresh 전달 방식 스위치
+
+### Changed (변경)
+
+- **`skeleton/backend/` 를 공통 백엔드와 동일하게 교체** — nextjs·react·svelte·nuxt 템플릿이 같은 백엔드 코드를 쓴다
+  (`backend/.env.example` 만 템플릿별 값). 이 템플릿은 `REFRESH_TOKEN_TRANSPORT=cookie` 로 기존 쿠키 계약을 그대로 유지한다 —
+  httpOnly 쿠키 `refresh_token`, `Path=/api/v1/auth`, `SameSite=Lax`, `Secure=COOKIE_SECURE`, `/auth/refresh` 는 쿠키로만 받고
+  실패 시 401 + 쿠키 삭제, `/auth/logout` 은 항상 204 + 쿠키 삭제, 로그인 잠금은 429.
+- **응답 형태 확장** — `TokenResponse` 가 `{access_token, refresh_token, token_type, expires_in, refresh_expires_in}` 이 됐다.
+  cookie 모드에서 `refresh_token` 은 항상 `null` 이다. 프론트 `TokenResponse` 타입을 맞췄다.
+- **access JWT 에 `sid`(세션 id) 클레임** — `/auth/me` 등 인증 요청마다 세션 유효성을 검사하므로 로그아웃·세션 폐기 즉시
+  access 토큰도 401 이 된다. `sid` 없는 기존 토큰은 401 이다.
+- **refresh 회전에 직전 토큰 60초 유예** — 멀티 탭 동시 갱신을 재사용으로 오판하지 않는다. 유예 밖 재사용·위조 토큰은
+  **그 세션만** 폐기한다(기존: 그 사용자의 모든 세션 폐기). 회전해도 절대 수명(`REFRESH_TOKEN_EXPIRE_DAYS`)은 연장되지 않는다.
+- **로그인 시도 제한을 DB 로 이동** — 인메모리 `app/core/rate_limit.py`((username, IP)별 5분 창, `Retry-After`)를 제거하고
+  계정별 DB 카운터 `login_throttles`(`LOGIN_MAX_FAILURES`=5, `LOGIN_LOCKOUT_MINUTES`=15)로 대체했다. 다중 워커에서도 공유되며,
+  미존재 계정도 같은 429 를 받는다. **429 응답에 `Retry-After` 헤더는 더 이상 없다.**
+- **초기 관리자 시드 키 변경** — `INITIAL_ADMIN_USERNAME`/`INITIAL_ADMIN_PASSWORD` → `SEED_DEFAULT_ADMIN`(코드 기본값 꺼짐) +
+  `DEFAULT_ADMIN_PASSWORD`(기본값 없음, 아이디는 `admin` 고정). 스캐폴드가 개발 `.env` 에서만 무작위 비밀번호로 켠다.
+- **`APP_ENV=production` fail-fast** — 공개 기본 `SECRET_KEY`, 관리자 시드, cookie 모드 + `COOKIE_SECURE=false` 면 기동을 거부한다.
+  개발에서는 기본 `SECRET_KEY` 를 경고만 한다(기존: 32자 미만·기본값이면 항상 `Settings` 검증에서 기동 거부).
+- **스캐폴드 `.env` 생성** (`scaffold.ps1`·`scaffold.sh`) — `LOGIN_*`·`REFRESH_TOKEN_TRANSPORT=cookie`·`APP_ENV=development`·
+  `SEED_DEFAULT_ADMIN=true`·`DEFAULT_ADMIN_PASSWORD` 를 쓰고 `INITIAL_ADMIN_*` 를 제거했다. 재실행 시 기존 `backend/.env` 를
+  `.env.bak.<시각>` 으로 백업하고, `backend/.env` 권한을 현재 사용자로 제한한다(PowerShell ACL / `chmod 600`).
+- **프론트 로그인 오류 문구** — 429 이면 "로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요." 를, 401/422 이면 자격증명 오류를
+  보여준다(`useLogin().errorMessage`). 로그인 화면의 `admin / admin123` 안내 문구를 제거했다(그런 기본 계정은 없다).
+- 문서: `ARCHITECTURE.md` §2·§5·§9(테이블·엔드포인트 계약·전달 방식·로그인 보호)·§12·§14·§17·§21(배포 전 체크리스트),
+  `AGENTS.md`, `skeleton/README.md`, 루트 `README.md`, `stack-versions` 스킬.
+
+### Removed (제거)
+
+- 백엔드 보안 응답 헤더 미들웨어(`X-Content-Type-Options`·`X-Frame-Options`·`Referrer-Policy`·`Cross-Origin-Opener-Policy`·HSTS)와
+  `/api/v1/auth` 응답의 `Cache-Control: no-store` — 공통 백엔드에 없다. 필요하면 리버스 프록시에서 설정한다.
+- `app/models/session.py`·`alembic/versions/0003_sessions.py`·`app/core/rate_limit.py`·`tests/test_security.py`.
+
+### ⚠️ Breaking (기존 생성 프로젝트)
+
+- **DB 스키마**: 리비전 `0003_sessions`(테이블 `sessions`)가 `0003_auth_sessions`(테이블 `auth_sessions` + `login_throttles`)로
+  바뀌었다. 이전 골격으로 만든 프로젝트에 이 백엔드를 옮기면 `alembic_version` 의 `0003_sessions` 를 찾지 못한다.
+  옮기려면 먼저 이전 코드로 `alembic downgrade 0002_users`(→ `sessions` 삭제, 기존 로그인 세션은 모두 무효)를 한 뒤
+  새 코드로 `alembic upgrade head` 를 실행한다. `0001_initial`·`0002_users` 는 리비전 id 가 같고, 새 판은
+  `created_at`/`updated_at` 에 `server_default=now()` 가 추가된 차이뿐이다(기존 DB 에는 반영되지 않지만 ORM 이 값을 채우므로 동작 영향 없음).
+- **`.env`**: `INITIAL_ADMIN_*` 는 무시된다. 시드가 필요하면 `SEED_DEFAULT_ADMIN=true` + `DEFAULT_ADMIN_PASSWORD` 를 넣고,
+  `REFRESH_TOKEN_TRANSPORT=cookie`·`LOGIN_*`·`APP_ENV` 를 추가한다.
+
+## 2026-10-02 — 골격 복사 시 빌드 산출물·`.env` 가 생성 프로젝트로 복사되던 문제 수정
+
+### Fixed (수정)
+
+- **골격 복사에서 산출물·비밀 제외** (`scaffold.ps1`·`scaffold.sh`) — 템플릿 저장소에서 개발/검증한 뒤 `skeleton/` 에 남은
+  `node_modules`·`.venv`·`.nuxt`·`.output`·`.ruff_cache`·`.pytest_cache`·`__pycache__`·`.DS_Store`·`.env` 가 생성 프로젝트로 그대로
+  복사됐다. 복사된 `node_modules` 때문에 `pnpm install` 이 `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY` 로 중단됐고, 실제 `.env` 가
+  있으면 템플릿의 `SECRET_KEY` 가 새 프로젝트로 샐 수 있었다. 이제 PowerShell 은 `robocopy /XD /XF`, bash 는 `tar --exclude` 로
+  원천 제외한다(nextjs 저장소와 동일한 처리). robocopy 가 숨김 항목도 복사하므로 닷파일·`.claude` 누락 보강 단계는 제거했다.
+  토큰 치환 단계도 같은 디렉터리(+ `.git`)를 걸러 재실행 시 산출물을 붙잡지 않는다.
+
 ## 2026-10-02 — pyenv 환경에서 스캐폴드가 Python 검증에 실패하던 문제 수정
 
 ### Fixed (수정)

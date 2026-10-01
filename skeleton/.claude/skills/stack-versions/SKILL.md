@@ -160,14 +160,18 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 - 자체 계정 비밀번호는 **bcrypt** 해시(`core/security` 의 `hash_password`/`verify_password`).
   ⚠️ bcrypt 는 72바이트까지만 쓴다 → 비밀번호 정책이 UTF-8 72바이트 이하를 강제한다(ARCHITECTURE.md §9).
   ⚠️ **bcrypt 5 부터 `hashpw`/`checkpw` 가 72바이트 초과 입력에 `ValueError` 를 던진다**(4.x 는 조용히 잘랐다).
-  → 바이트 상한은 **bcrypt 호출 전에** 검사한다: 로그인은 `LoginRequest` 스키마 검증(422), 계정 생성은
-  `validate_password_policy`(`ServiceError("weak_password")`), `verify_password` 는 초과 시 `False`.
-  ⛔ 이 가드를 지우면 긴 비밀번호 한 번으로 500 이 난다(`test_login_over_72_bytes_password_is_clean_4xx`).
-- access 는 JWT(HS256, `sub` = user id, 15분) — **refresh 는 JWT 가 아니라 불투명 토큰**이다
-  (`secrets.token_urlsafe(48)`, DB `sessions` 에 SHA-256 해시만, 회전 + 재사용 감지). 상세는 ARCHITECTURE.md §9.
-- `SECRET_KEY` 는 32자 미만·기본값이면 `Settings` 검증이 기동을 거부한다. 초기 관리자는 `.env` 의
-  `INITIAL_ADMIN_USERNAME`/`INITIAL_ADMIN_PASSWORD` 로 시드(미설정 시 스킵) — 하드코딩 기본 계정 없음.
-- 로그인 429 rate limit 은 **인메모리(단일 프로세스 전제)** — 다중 워커 배포는 Redis 필요.
+  → 바이트 상한은 **bcrypt 호출 전에** 검사한다: 로그인은 `LoginRequest` 스키마 검증(422), 새 비밀번호는
+  `validate_new_password`(최소 8자 + 72 bytes 상한), `hash_password` 는 초과 시 `ValueError`, `verify_password` 는 형식 오류 시 `False`.
+  ⛔ 이 가드를 지우면 긴 비밀번호 한 번으로 500 이 난다(`test_login_password_over_72_bytes_422`).
+- access JWT 클레임은 `sub`(user id)·`sid`(세션 id)·`iat`·`exp`·`typ:"access"` — `sid` 없는 토큰·폐기된 세션의 토큰은 401 이다.
+  **refresh 는 JWT 가 아니라 불투명 토큰**(`"<session_id>.<무작위>"`)이고 DB `auth_sessions` 에 SHA-256 해시만 저장한다
+  (회전 + 직전 토큰 60초 유예 + 재사용 감지 시 세션 폐기). 상세는 ARCHITECTURE.md §9.
+- refresh 토큰 전달은 `REFRESH_TOKEN_TRANSPORT=cookie`(이 템플릿) — 백엔드가 httpOnly 쿠키 `refresh_token`(`Path=/api/v1/auth`)을
+  심고 응답 본문의 `refresh_token` 은 `null` 이다. ⛔ 브라우저 SPA 에서 `body` 로 바꾸지 않는다(refresh 토큰이 JS 에 노출).
+- `SECRET_KEY` 가 공개 기본값이면 개발은 경고, `APP_ENV=production` 은 기동 거부. 기본 관리자는 `SEED_DEFAULT_ADMIN=true` +
+  `DEFAULT_ADMIN_PASSWORD` 로 시드(코드 기본값 꺼짐, 비밀번호 기본값 없음 — 스캐폴드가 개발 `.env` 에서만 무작위로 켠다).
+- 로그인 429 는 **DB `login_throttles`** 의 계정별 잠금(`LOGIN_MAX_FAILURES`·`LOGIN_LOCKOUT_MINUTES`)이라 다중 워커에서도 공유된다.
+  `Retry-After` 헤더는 없다.
 - 백엔드 린트는 **ruff**(`backend/pyproject.toml`): FastAPI `Depends` 등은 **B008 예외**(`extend-immutable-calls`), `alembic/` 제외, line-length 120. 새 의존성으로 lint 가 깨지면 이 설정을 먼저 본다.
   - ruff 0.16 은 `UP042`(`class X(str, enum.Enum)` → **`enum.StrEnum`**)를 낸다. `UserRole` 은 `StrEnum` 이다(사용처는 모두 `.value` 라 동작 동일).
   - CI 게이트는 `ruff check .` 뿐이다. `ruff format` 은 강제하지 않는다(현재 코드도 format 기준과 다르다).

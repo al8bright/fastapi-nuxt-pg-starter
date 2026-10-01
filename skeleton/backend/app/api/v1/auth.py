@@ -1,40 +1,53 @@
 """인증 라우터 (ARCHITECTURE.md §4, §9) — 얇은 HTTP 계층.
 
-자체 계정 username/password 로그인 → access JWT(응답 본문) + refresh 토큰(httpOnly 쿠키).
-refresh 토큰은 DB 세션(services/session_service.py)으로 관리하며 매 회전마다 교체된다.
+자체 계정 username/password 로그인 → access JWT + DB 세션 기반 refresh 토큰 발급.
+회전(rotate)·폐기(revoke)·시도 제한의 도메인 로직은 services 에 있고, 여기서는
+ServiceError 를 HTTP 상태로 변환만 한다.
+
+refresh 토큰 전달 방식은 REFRESH_TOKEN_TRANSPORT 로 고른다 (§9).
+- cookie: 백엔드가 httpOnly 쿠키로 심고 읽는다. 응답 본문의 refresh_token 은 null (브라우저 SPA).
+- body:   JSON 본문으로 주고받는다. 쿠키를 쓰지 않는다 (BFF 가 자기 쿠키에 보관).
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.core.rate_limit import login_limiter
 from app.core.security import create_token
 from app.dependencies import get_current_user, get_db
+from app.models.auth_session import AuthSession
 from app.models.user import User
-from app.schemas.user import LoginRequest, TokenResponse, UserRead
+from app.schemas.user import (
+    REFRESH_TOKEN_MAX_LENGTH,
+    LoginRequest,
+    LogoutRequest,
+    RefreshRequest,
+    TokenResponse,
+    UserRead,
+)
 from app.services import session_service, user_service
 from app.services.exceptions import ServiceError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 REFRESH_COOKIE = "refresh_token"
-REFRESH_COOKIE_PATH = "/api/v1/auth"  # refresh/logout 에만 전송되도록 경로를 좁힌다
+# refresh/logout 에만 전송되도록 경로를 좁힌다 — 일반 API 요청에는 refresh 쿠키가 실리지 않는다.
+REFRESH_COOKIE_PATH = "/api/v1/auth"
 
 
-def _client_ip(request: Request) -> str:
-    """클라이언트 IP — 리버스 프록시 뒤에서는 X-Forwarded-For 첫 값을 우선한다."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+def _uses_cookie(settings: Settings) -> bool:
+    return settings.refresh_token_transport == "cookie"
 
 
-def _set_refresh_cookie(response: Response, raw_token: str, settings: Settings) -> None:
+def _set_refresh_cookie(
+    response: Response, *, refresh_plain: str, session: AuthSession, settings: Settings
+) -> None:
+    # 쿠키 수명 = 세션의 남은 절대 수명(응답의 refresh_expires_in 과 같은 값) — 회전해도 연장되지 않는다.
     response.set_cookie(
         REFRESH_COOKIE,
-        raw_token,
-        max_age=settings.refresh_token_expire_days * 86400,
+        refresh_plain,
+        max_age=session_service.refresh_expires_in_seconds(session),
         path=REFRESH_COOKIE_PATH,
         httponly=True,
         samesite="lax",
@@ -52,8 +65,25 @@ def _delete_refresh_cookie(response: Response, settings: Settings) -> None:
     )
 
 
+def _cookie_refresh_token(request: Request) -> str | None:
+    """요청 쿠키의 refresh 토큰. 비었거나 비정상적으로 길면 None (본문 스키마와 같은 상한)."""
+    raw = request.cookies.get(REFRESH_COOKIE)
+    if not raw or len(raw) > REFRESH_TOKEN_MAX_LENGTH:
+        return None
+    return raw
+
+
+def _require_body(body: RefreshRequest | LogoutRequest | None) -> str:
+    """body 모드에서는 본문이 필수다 — 시그니처상 선택(쿠키 모드 422 방지)이라 여기서 422 를 낸다."""
+    if body is None:
+        raise RequestValidationError(
+            [{"type": "missing", "loc": ("body",), "msg": "Field required", "input": None}]
+        )
+    return body.refresh_token
+
+
 def _unauthorized_clearing_cookie(settings: Settings, detail: str) -> JSONResponse:
-    """401 응답 + refresh 쿠키 삭제 (raise 하면 쿠키 삭제 헤더가 실리지 않으므로 직접 만든다)."""
+    """401 + refresh 쿠키 삭제. HTTPException 을 raise 하면 Set-Cookie 가 실리지 않으므로 직접 만든다."""
     response = JSONResponse(
         status_code=status.HTTP_401_UNAUTHORIZED,
         content={"detail": detail},
@@ -63,79 +93,124 @@ def _unauthorized_clearing_cookie(settings: Settings, detail: str) -> JSONRespon
     return response
 
 
+def _token_pair_response(
+    *,
+    response: Response,
+    user_id: int,
+    session: AuthSession,
+    refresh_plain: str,
+    settings: Settings,
+) -> TokenResponse:
+    """로그인/리프레시 공통 응답 조립 — 두 경로의 응답 형태는 계약상 동일해야 한다.
+
+    cookie 모드는 refresh 토큰을 쿠키로만 내보내고 본문에는 싣지 않는다(null).
+    """
+    token = create_token(
+        subject=str(user_id),
+        session_id=session.id,
+        secret=settings.secret_key,
+        expires_minutes=settings.access_token_expire_minutes,
+    )
+    if _uses_cookie(settings):
+        _set_refresh_cookie(
+            response, refresh_plain=refresh_plain, session=session, settings=settings
+        )
+    return TokenResponse(
+        access_token=token,
+        refresh_token=None if _uses_cookie(settings) else refresh_plain,
+        expires_in=settings.access_token_expire_minutes * 60,
+        refresh_expires_in=session_service.refresh_expires_in_seconds(session),
+    )
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(
     body: LoginRequest,
-    request: Request,
     response: Response,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> TokenResponse:
-    key = (body.username, _client_ip(request))
-    retry = login_limiter.retry_after(key)
-    if retry is not None:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.",
-            headers={"Retry-After": str(retry)},
-        )
     try:
         user = user_service.authenticate(db, body.username, body.password)
     except ServiceError as e:
-        login_limiter.record_failure(key)
+        if e.code == "too_many_attempts":
+            # Retry-After(초) — 클라이언트가 잠금 해제 시점을 알 수 있게 한다 (RFC 9110 §10.2.3).
+            headers = {"Retry-After": str(e.retry_after)} if e.retry_after else None
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=e.message,
+                headers=headers,
+            ) from e
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=e.message,
             headers={"WWW-Authenticate": "Bearer"},
         ) from e
-    login_limiter.clear(key)
-    refresh_raw = session_service.issue(db, user)
-    _set_refresh_cookie(response, refresh_raw, settings)
-    token = create_token(
-        subject=str(user.id),
-        secret=settings.secret_key,
-        expires_minutes=settings.access_token_expire_minutes,
+    session, refresh_plain = session_service.create_session(db, user_id=user.id)
+    return _token_pair_response(
+        response=response,
+        user_id=user.id,
+        session=session,
+        refresh_plain=refresh_plain,
+        settings=settings,
     )
-    return TokenResponse(access_token=token)
 
 
 @router.post("/refresh", response_model=TokenResponse)
 def refresh(
     request: Request,
+    response: Response,
+    body: RefreshRequest | None = None,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-) -> Response:
-    raw = request.cookies.get(REFRESH_COOKIE)
-    if raw is None:
-        return _unauthorized_clearing_cookie(settings, "인증이 필요합니다.")
-    try:
-        user, new_raw = session_service.rotate(db, raw)
-    except ServiceError as e:
-        return _unauthorized_clearing_cookie(settings, e.message)
-    token = create_token(
-        subject=str(user.id),
-        secret=settings.secret_key,
-        expires_minutes=settings.access_token_expire_minutes,
+) -> TokenResponse | Response:
+    if _uses_cookie(settings):
+        # cookie 모드는 본문을 보지 않는다 — refresh 토큰은 쿠키로만 받는다.
+        # 실패(쿠키 없음/형식 오류/만료/폐기/재사용)는 원인 무관 401 + 쿠키 삭제다.
+        refresh_token = _cookie_refresh_token(request)
+        if refresh_token is None:
+            return _unauthorized_clearing_cookie(settings, session_service.INVALID_REFRESH_MESSAGE)
+        try:
+            session, refresh_plain = session_service.rotate(db, refresh_token)
+        except ServiceError as e:
+            return _unauthorized_clearing_cookie(settings, e.message)
+    else:
+        refresh_token = _require_body(body)
+        try:
+            session, refresh_plain = session_service.rotate(db, refresh_token)
+        except ServiceError as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=e.message,
+                headers={"WWW-Authenticate": "Bearer"},
+            ) from e
+    return _token_pair_response(
+        response=response,
+        user_id=session.user_id,
+        session=session,
+        refresh_plain=refresh_plain,
+        settings=settings,
     )
-    response = JSONResponse(
-        content=TokenResponse(access_token=token).model_dump(),
-    )
-    _set_refresh_cookie(response, new_raw, settings)
-    return response
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(
     request: Request,
-    response: Response,
+    body: LogoutRequest | None = None,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-) -> None:
-    """세션 revoke + 쿠키 삭제. 인증 없이도 호출 가능 (멱등)."""
-    raw = request.cookies.get(REFRESH_COOKIE)
-    if raw is not None:
-        session_service.revoke(db, raw)
-    _delete_refresh_cookie(response, settings)
+) -> Response:
+    # 인증 불요 — refresh 토큰 "소지" 가 폐기 권한이다(session_service.revoke 가 해시 검증).
+    # 어떤 입력에도 204 로 멱등 응답해 토큰 상태를 탐침할 수 없게 한다.
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    if _uses_cookie(settings):
+        refresh_token = _cookie_refresh_token(request)
+        if refresh_token is not None:
+            session_service.revoke(db, refresh_token)
+        _delete_refresh_cookie(response, settings)
+    else:
+        session_service.revoke(db, _require_body(body))
+    return response
 
 
 @router.get("/me", response_model=UserRead)

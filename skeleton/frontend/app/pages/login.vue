@@ -53,7 +53,7 @@ const onSubmit = async () => {
         v-if="loginMutation.isError.value"
         class="mt-3 rounded-lg bg-error-container px-3 py-2 text-sm text-on-error-container"
       >
-        아이디 또는 비밀번호가 올바르지 않습니다.
+        {{ loginMutation.errorMessage.value }}
       </p>
 
       <button
@@ -63,10 +63,6 @@ const onSubmit = async () => {
       >
         {{ loginMutation.isPending.value ? "로그인 중…" : "로그인" }}
       </button>
-
-      <p class="mt-4 text-center text-xs text-on-surface-variant">
-        기본 관리자 계정: <code class="font-mono">admin / admin123</code>
-      </p>
     </form>
   </main>
 </template>
