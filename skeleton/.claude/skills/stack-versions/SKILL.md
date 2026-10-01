@@ -15,7 +15,7 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 ## 2. 버전 스냅샷 (2026-10-02 기준)
 - **런타임**: Python ≥ 3.13 · Node ≥ 24 · pnpm ≥ 11 (PostgreSQL 고정 없음, 14+ 권장)
 - **백엔드**: FastAPI 0.142.2 · Uvicorn 0.54.0 · SQLAlchemy 2.1.1 · Alembic 1.20.0 · Pydantic 2.13.5 / settings 2.15.0 · psycopg2-binary 2.9.13 · PyJWT 2.15.1 · bcrypt 5.0.0 · httpx2 2.13.1 · pytest 9.1.1 · ruff 0.16.9
-- **프론트**: nuxt `4.5` · vue `3.5` · vue-router `5.3` · pinia `4.0` · @pinia/nuxt `1.0` · tailwindcss `4.3` · @tailwindcss/vite `4.3` · @nuxt/eslint `1.17` · eslint `10.11` · typescript `6.0` · vue-tsc `3.3` · @types/node `24` · pnpm `11.28`(packageManager)
+- **프론트**: nuxt `4.5` · vue `3.5` · vue-router `5.3` · pinia `4.0` · @pinia/nuxt `1.0` · tailwindcss `4.3` · @tailwindcss/vite `4.3` · @nuxt/eslint `1.17` · eslint `10.11` · typescript `6.0` · vue-tsc `3.3` · vitest `5.0` · jsdom `30.1` · @vue/test-utils `2.5` · @vitejs/plugin-vue `6.0` · @types/node `24` · pnpm `11.28`(packageManager)
   (⛔ HTTP 는 `$fetch`(ofetch, Nuxt 내장) — **axios 의존성 없음**. 서버 상태도 쿼리 라이브러리 없이 Nuxt 내장 `useAsyncData` 를 쓴다.)
 
 ## 3. ⚠️ 버전별 함정 (코드·설정 작성 시 반드시)
@@ -142,6 +142,16 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
 - **`eslint: { config: { stylistic: false } }` 를 유지한다** — 켜면 eslint 기본이 single quote 라
   이 저장소 스타일(큰따옴표·세미콜론 없음)과 싸운다. 코드 스타일은 규칙으로 강제하지 않는다.
 
+### Vitest (프론트 단위 테스트)
+- `pnpm test` = `vitest run`, 설정은 **`frontend/vitest.config.ts`(Nuxt 와 별개)** — `@vitejs/plugin-vue` + jsdom + `~`/`@` → `app` 별칭.
+  ⛔ Nuxt 런타임(자동 import·`useNuxtApp`·`useAsyncData`)이 없다 → 대상은 `app/lib/**` 순수 모듈과 **vue API·하위 컴포넌트를 명시 import 한 컴포넌트**(에디터·`RichContent`)뿐.
+  페이지까지 테스트하려면 `@nuxt/test-utils` 가 필요하다(이 스캐폴드는 쓰지 않는다 — 무겁고 Nuxt 버전과 묶인다).
+- `@vitejs/plugin-vue` 는 **Nuxt(@nuxt/vite-builder)가 쓰는 범위와 같은 메이저**(6.x)로 둔다 — vite 인스턴스가 하나로 합쳐진다.
+- jsdom 에는 `document.execCommand`·canvas·`createImageBitmap` 이 없다 → 에디터 테스트는 `execCommand` 를 Range 로 흉내 내고 `lib/editor/imageCanvas` 를 `vi.mock` 한다.
+- 템플릿 **맨 위**의 HTML 주석(`<!-- eslint-disable-next-line ... -->`)은 dev 빌드에서 루트 노드가 되어 컴포넌트가 fragment 가 된다 →
+  부모가 준 `class` 가 상속되지 않는다. 템플릿 eslint 예외는 `<script>` 의 `/* eslint-disable rule */` 로 둔다(`RichContent.vue`).
+- `components/` 안의 `*.test.ts` 는 Nuxt 기본 ignore 패턴이라 컴포넌트로 등록되지 않는다. `.ts` 도우미 모듈은 `components/` 에 두지 말고 `app/lib/` 로(자동 등록 대상이다).
+
 ### FastAPI 0.142 + Starlette 1.x
 - TestClient 는 **httpx2** 를 쓴다(httpx 아님). `requirements.txt` 에 `httpx2`. ⛔ `httpx` 로 되돌리면 deprecation 경고.
 - 서버↔서버 HTTP 클라이언트도 `httpx2`.
@@ -176,7 +186,7 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
   - ruff 0.16 은 `UP042`(`class X(str, enum.Enum)` → **`enum.StrEnum`**)를 낸다. `UserRole` 은 `StrEnum` 이다(사용처는 모두 `.value` 라 동작 동일).
   - CI 게이트는 `ruff check .` 뿐이다. `ruff format` 은 강제하지 않는다(현재 코드도 format 기준과 다르다).
 - 프론트 린트는 **eslint + @nuxt/eslint**(`frontend/eslint.config.mjs`, flat config).
-- **CI**(`.github/workflows/ci.yml`)가 push·PR(main) 마다 backend(ruff+pytest) / frontend(**eslint + typecheck + build**) 를 실행. 워크플로는 생성 프로젝트(루트)에서만 동작한다.
+- **CI**(`.github/workflows/ci.yml`)가 push·PR(main) 마다 backend(ruff+pytest) / frontend(**eslint + typecheck + vitest + build**) 를 실행. 워크플로는 생성 프로젝트(루트)에서만 동작한다.
 
 ## 4. 백엔드 핀 정책
 - `requirements.txt` 는 **`==` 정확 핀, 재현성 우선**(ARCHITECTURE.md §2).
@@ -189,6 +199,6 @@ description: __PROJECT_NAME__ 의 고정 스택 버전과 버전별 주의사항
    (스크립트가 런타임 사전 점검·bootstrap 단계에서 멈추면 `skeleton/` 을 복사한 뒤 `__PROJECT_NAME__`/`__PROJECT_SNAKE__`/`__THEME_CSS__` 를 치환하고 `backend/.env`·`frontend/.env` 를 직접 만들어 대체한다)
 2. 백엔드: `python -m venv .venv` → `pip install -r requirements.txt` → `ruff check .` → `pytest -q`(+ 1회 `-W error::DeprecationWarning`)
    → 실제 PostgreSQL(예: `docker run postgres:16`)에 `alembic upgrade head` → `alembic check`
-3. 프론트: `pnpm install` → `pnpm lint` → `pnpm typecheck` → `pnpm build`
+3. 프론트: `pnpm install` → `pnpm lint` → `pnpm typecheck` → `pnpm test` → `pnpm build`
    (install 전후로 `package.json`·`pnpm-workspace.yaml` 이 바뀌지 않았는지 diff 로 확인 — 바뀌면 템플릿 오염)
 4. 통과 시 핀 고정 후 **갱신할 곳을 모두**: SoT 파일 + `README.md` 표(+기준일) + 필요 시 `ARCHITECTURE.md` + **이 스킬의 스냅샷/주의(§2·§3)**. 커밋/PR은 [pr-workflow].

@@ -441,7 +441,8 @@ cat <<EOF
   pnpm typecheck        # 타입 검사 (nuxt typecheck — vue-tsc)
 
 [확인]    브라우저: http://localhost:5173
-          → '백엔드 API'와 '데이터베이스'가 모두 '정상'이면 성공입니다.
+          → 공개 홈 화면이 보이면 성공입니다. admin 으로 로그인한 뒤 '관리자 콘솔 > 시스템 상태'에서
+            '백엔드 API'와 '데이터베이스'가 모두 '정상'인지 확인하세요.
 
 [관리자]  초기 관리자 계정 (backend/.env 의 DEFAULT_ADMIN_PASSWORD):
   아이디: admin

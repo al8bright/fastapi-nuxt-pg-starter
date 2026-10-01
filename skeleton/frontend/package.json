@@ -15,6 +15,8 @@
     "preview": "nuxt preview",
     "typecheck": "nuxt typecheck",
     "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "postinstall": "nuxt prepare"
   },
   "dependencies": {
@@ -28,9 +30,13 @@
     "@nuxt/eslint": "^1.17.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^24.19.0",
+    "@vitejs/plugin-vue": "^6.0.9",
+    "@vue/test-utils": "^2.5.1",
     "eslint": "^10.11.0",
+    "jsdom": "^30.1.1",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.3",
+    "vitest": "^5.0.3",
     "vue-tsc": "^3.3.11"
   }
 }

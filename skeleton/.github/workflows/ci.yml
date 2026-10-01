@@ -70,5 +70,7 @@ jobs:
         run: pnpm lint
       - name: Type check (nuxt typecheck)
         run: pnpm typecheck
+      - name: Unit tests (vitest)
+        run: pnpm test
       - name: Build (Nuxt)
         run: pnpm build

@@ -5,6 +5,71 @@
 
 ---
 
+## 2026-10-02 — 공지사항·배너·관리자 API + 업로드 저장소·본문 HTML 정화 (네 템플릿 공통 백엔드) + 사용자 화면·관리자 콘솔·자체 리치 에디터 (Nuxt)
+
+### Added (추가)
+
+- **테이블 3종** (alembic `0004_notices_banners`) — `notices`(정화된 `body_html`, 고정·게시·`published_at`·조회수, `author_id` SET NULL),
+  `notice_attachments`(공지 CASCADE, 공지당 최대 10개), `banners`(이미지 key·크기, `link_url`, 노출 기간 `starts_at`/`ends_at`, 순서, 활성).
+- **공개 API** — `GET /notices`(게시분만, 고정 먼저 → 게시일 최신순, `page·size·q`), `GET /notices/{id}`(조회수 +1, 첨부 목록),
+  `GET /notices/{id}/attachments/{aid}`(attachment + RFC 5987 `filename*` 한글 파일명 + nosniff), `GET /banners`(활성 + KST 노출 기간 안).
+- **관리자 API** (`/admin/*`, 라우터 단위 `require_admin` — 비로그인 401, 일반 사용자 403) — 대시보드 집계(사용자·세션·잠금·공지·배너·DB 상태·Alembic 리비전),
+  사용자 목록·권한/활성 변경(자기 강등·비활성화 금지, 마지막 활성 관리자 보호 409, 비활성화 시 세션 전부 폐기), 세션 목록·강제 폐기,
+  로그인 잠금 목록·해제, 공지 CRUD·첨부 업로드/다운로드/삭제, 배너 CRUD·이미지 업로드·순서 변경, 에디터 이미지 업로드(`POST /admin/editor/images` → `{key,url,width,height}`).
+- **업로드 저장소** `app/core/storage.py` — `UPLOAD_DIR`(기본 `backend/uploads/`, `.gitignore`) 아래 서버 생성 키로만 저장.
+  이미지는 시그니처 + Pillow 검증(PNG·JPEG·WebP·GIF), EXIF 방향 반영 후 메타데이터 없이 재인코딩, 긴 변 2000px 초과 축소, GIF 는 원본 그대로.
+  첨부는 확장자 허용 목록·무작위 파일명(원본 이름은 DB). `public/` 만 `/uploads/public` 으로 정적 서빙하고 `private/` 첨부는 API 로만 내려간다.
+- **본문 HTML 정화** `app/core/sanitize.py`(nh3) — 에디터 명세 §7 허용 목록. 유튜브 embed 외 iframe 제거 + sandbox 등 강제, `style`·`on*`·`javascript:`·`data:` 제거,
+  링크 `rel="noopener noreferrer"`. 공지 저장 시 서비스 계층에서 항상 정화하고, 정화 후 빈 본문은 422.
+- 새 설정 `UPLOAD_DIR`·`PUBLIC_FILES_BASE_URL`·`MAX_IMAGE_UPLOAD_MB`(5)·`MAX_ATTACHMENT_UPLOAD_MB`(20), 의존성 `nh3==0.3.7`·`pillow==12.3.0`.
+- `ServiceError`·`StorageError` 전역 핸들러(`app/api/errors.py`) — 코드별 HTTP 상태 표 한 곳, 응답 `{"detail","code"}`.
+- 백엔드 테스트 107 → **319** 건(`test_sanitize`·`test_storage`·`test_uploads_serving`·`test_notices`·`test_banners`·`test_admin`).
+
+### Added (프론트엔드 — 사용자 화면 디자인 A · 관리자 콘솔 디자인 A)
+
+- **공개 사용자 화면** (`layouts/default.vue` — 상단 내비 포털): 첫 화면 `/` 를 로그인 없이 공개. 홈은 배너 캐러셀(`GET /banners` — 이전/다음·점 버튼,
+  6초 자동 넘김은 마우스 올림·포커스·일시정지 버튼으로 멈춤, `prefers-reduced-motion` 이면 자동 넘김 없음, 내부 링크는 `NuxtLink`·외부 링크는 새 창 `noopener`)
+  — 배너가 없으면 기본 히어로, 주요 서비스(자리표시), 최신 공지 5건, 내 계정. `/notices`(고정 배지·첨부 표시·제목 검색·페이지, URL 쿼리),
+  `/notices/:id`(게시일·조회수·`RichContent` 본문·첨부 `download_url`·검색 상태를 지킨 "목록으로"), `/me`(내 정보). 계정 메뉴(내 정보·로그아웃)와 **admin 에게만** "관리자 콘솔" 링크.
+- **관리자 콘솔** (`/admin/**`, `layouts/admin.vue` — 그룹형 사이드바 개요·콘텐츠·회원·보안·시스템, 현재 메뉴 `aria-current`, "로그인 잠금" 잠긴 계정 수 배지,
+  1024px 미만은 상단 메뉴 서랍): 대시보드(KPI·최근 세션 강제 종료·잠금 해제), 공지(목록·작성/수정 — 리치 에디터, 상단 고정·게시, 첫 저장 뒤 수정 URL 로 전환해 첨부 패널 —
+  여러 파일 순차 업로드·파일별 상태/오류·확장자·용량·개수 사전 검사·Bearer blob 다운로드·삭제, 저장하지 않은 변경 이탈 확인),
+  배너(썸네일·기간·활성 토글 = PUT 전체 본문(낙관적)·위/아래 이동 = `PATCH /order`·삭제, 작성/수정 — 이미지 업로드 미리보기·대체 텍스트 필수·`link_url` 백엔드와 같은 규칙·
+  `datetime-local` KST 기간), 사용자(검색·역할 필터·권한/활성 변경·세션 모두 종료, 409 `self_modification`·`last_admin` 한국어 안내), 세션(`?user_id=` 필터·강제 종료),
+  로그인 잠금(잠김 강조·해제), 시스템 상태(헬스 체크 + DB·Alembic 리비전). 없는 `/admin/...` 경로는 대시보드로.
+- **자체 리치 텍스트 에디터** (`components/editor/*` + `lib/editor/*`, 라이브러리 없음 — `contentEditable` + `execCommand`, 호출은 `exec()` 한 곳):
+  문단·제목·굵게/기울임/밑줄/취소선·형광펜·서식 지우기·정렬(`class` 로만 저장)·목록·인용·구분선·링크, 붙여넣기 정리, undo/redo, 툴바 roving tabindex.
+  이미지(버튼·붙여넣기·드래그앤드롭, 업로드 전 긴 변 1600px·WebP 재인코딩, 자르기·회전 다이얼로그, 모서리 핸들·프리셋·폭 입력 크기 조절, 대체 텍스트, 다시 자르기, 교체·삭제),
+  유튜브 임베드(`youtube-nocookie`, 16:9 크기 조절·링크 바꾸기). 프로그램적 변경은 `Range.selectNode` → `exec("insertHTML"|"delete")` 로 커밋해 undo 에 남긴다.
+  업로드는 공용 `$api`(FormData `file`, Bearer·single-flight refresh 적용)로 `POST /admin/editor/images`. 순수 모듈(`richText`·`imageTransform`·`mediaHtml`)은 React 템플릿과 같은 코드다.
+- **가드** — `middleware/admin.ts`: 비로그인 → `/login?next=<원래 위치>`, role≠admin → 403(`app/error.vue`, fatal 오류라 클라이언트 이동에서도 표시).
+  `middleware/auth.ts`(`/me`)도 `next` 를 싣는다. 로그인 화면은 `next` 를 내부 경로만 받아(`lib/returnTo.ts` `safeNext`) 그 위치로 돌아간다.
+  `app/error.vue` — 404(사용자 레이아웃 안)·403·그 밖 오류 화면.
+- API 모듈 `api/notices.ts`·`banners.ts`·`admin.ts`·`common.ts`(계약과 같은 타입, `use<Domain>Api()`), 조회 컴포저블 `useNotices`·`useBanners`·`useAdmin`·`useListParams`
+  (키에 파라미터, 갱신은 `invalidate*()` = 떠 있는 관련 키 `refreshNuxtData`), 명령 헬퍼 `useAction`, `useUploads`(`useFileUrl`·`useEditorImageUpload`),
+  공용 UI `components/ui/*`(ConfirmDialog·Pagination·Chip·Loading·ErrorState·EmptyState·Notice·SearchForm·Icon), `lib/*`(`apiError` — FetchError·NuxtError 의 도메인 code·413·422 → 한국어,
+  `format`·`linkUrl`·`uploadRules`·`bannerForm`·`download`·`site`·`ui`·`adminNav`).
+- 확장 디자인 토큰 기본값(`primary-fixed`·`outline`·`surface-container-low/high/highest`·`tertiary`·`error` 등)과 `.rich-text`·`.editor` 본문 스타일을 `main.css` 에 추가 —
+  기본 테마(`-NoDesign`)에서도 동작하고, DESIGN.md 테마가 주입되면 그 값이 이긴다.
+- **프론트 단위 테스트 도입** — vitest 5 + jsdom + `@vue/test-utils` + `@vitejs/plugin-vue`(devDependencies), `pnpm test`, `frontend/vitest.config.ts`(Nuxt 와 별개).
+  9 파일 **195** 건: 에디터 순수 모듈(React 와 같은 테스트), 업로드·`apiError`·`returnTo`·배너 폼 검증, `RichTextEditor`(붙여넣기 정리·유튜브·업로드 자리표시·자르기 값·
+  선택 오버레이 크기 커밋·삭제·대체 텍스트·정렬·형광펜)·`RichContent` 컴포넌트. CI(생성 프로젝트·템플릿)와 push 전 검증 명령에 `pnpm test` 추가.
+- dev 프록시에 `/uploads` 추가(`nitro.devProxy`, 백엔드 공개 파일을 같은 오리진으로). 운영은 리버스 프록시 또는 `PUBLIC_FILES_BASE_URL`(ARCHITECTURE §14 "파일 URL").
+
+### Changed (프론트엔드)
+
+- 첫 화면 `/` 가 공개 홈이 됐다(이전: 로그인 필수 메인). 옛 메인(`pages/index.vue`)·랜딩(`pages/landing.vue`) 삭제 — 시스템 상태는 관리자 콘솔 `/admin/system` 으로 옮겼다.
+  `/my` 는 `/me` 로 리다이렉트. 로그인 화면에 "홈으로" 링크, 로그인 실패 문구를 상태코드별로 세분(네트워크·422·5xx).
+- 로그아웃은 홈(`/`)으로 가고 `clearNuxtData()` 로 조회 캐시를 전부 비운다. `$api` 의 refresh 실패는 로그인 필요 화면(`/admin/**`·`/me`)에서만 `/login?next=` 로 보낸다
+  (공개 화면에서는 세션만 비운다).
+- 스캐폴드 완료 메시지·루트 README 의 확인 안내를 "홈 화면 → 관리자 콘솔 › 시스템 상태" 로 바꿨다.
+
+### ⚠️ 기존 프로젝트에 반영할 때
+
+- `pip install -r requirements.txt` → `alembic upgrade head`(0004) → `backend/.env` 에 위 4개 키 추가(없으면 기본값). `backend/uploads/` 를 `.gitignore` 에 추가한다.
+- 프론트엔드: `frontend/app` 의 새 `api`·`composables`·`components`·`layouts`·`middleware`·`pages`·`lib`·`error.vue` 를 옮기고 `pages/landing.vue` 를 지운다.
+  `main.css` 의 확장 토큰 `@theme` 블록과 `.rich-text` 스타일, `nuxt.config.ts` 의 `/uploads` devProxy, `vitest.config.ts` 와 `package.json` 의 `test` 스크립트·devDependencies 4종을 추가한다.
+
 ## 2026-10-02 — 백엔드 보안 보강 (네 템플릿 공통)
 
 ### Added (추가)

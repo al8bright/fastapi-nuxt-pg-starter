@@ -46,9 +46,14 @@ export default defineNuxtConfig({
   // dev 프록시: /api → FastAPI. 운영에서는 NUXT_PUBLIC_API_BASE_URL 로 절대 URL 을 준다.
   // dev 는 프록시 덕에 refresh 쿠키가 same-origin 으로 동작한다. 운영에서 다른 오리진을 줄 경우
   // 쿠키(SameSite=Lax)가 전송되려면 same-site(같은 사이트의 서브도메인) 배포가 전제다.
+  // /uploads → 백엔드 공개 파일(에디터·배너 이미지, UPLOAD_DIR/public). 백엔드가 주는 파일 URL 은
+  // 루트 상대(/uploads/public/...)라 dev 에서도 같은 오리진으로 받게 한다. 운영은 리버스 프록시가
+  // /api·/uploads 를 백엔드로 넘기거나, 백엔드 .env 의 PUBLIC_FILES_BASE_URL 로 절대 URL 을 받는다(§17).
+  // ⚠️ nitro devProxy 는 prefix 를 벗겨 target 뒤에 붙인다 — target 에 prefix 를 포함해야 한다.
   nitro: {
     devProxy: {
       "/api": { target: "http://localhost:8000/api", changeOrigin: true },
+      "/uploads": { target: "http://localhost:8000/uploads", changeOrigin: true },
     },
   },
 

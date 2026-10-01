@@ -15,13 +15,13 @@ CI는 push 이후에 도는 **사후 안전망**이지 사전 게이트가 아�
 ```bash
 # macOS / Linux
 cd backend && ./.venv/bin/python -m pytest -q && ./.venv/bin/python -m ruff check .
-cd ../frontend && pnpm lint && pnpm typecheck && pnpm build
+cd ../frontend && pnpm lint && pnpm typecheck && pnpm test && pnpm build
 ```
 
 ```powershell
 # Windows
 cd backend;  .\.venv\Scripts\python -m pytest -q;  .\.venv\Scripts\python -m ruff check .
-cd ..\frontend;  pnpm lint;  pnpm typecheck;  pnpm build
+cd ..\frontend;  pnpm lint;  pnpm typecheck;  pnpm test;  pnpm build
 ```
 
 - 실패했거나 확인하지 않았으면 **push 하지 않는다.**

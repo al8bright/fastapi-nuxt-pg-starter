@@ -26,6 +26,8 @@
 | psycopg2-binary | 2.9.13 |
 | Pydantic / pydantic-settings | 2.13.5 / 2.15.0 |
 | PyJWT | 2.15.1 |
+| nh3 (본문 HTML 정화) | 0.3.7 |
+| pillow (업로드 이미지 재인코딩) | 12.3.0 |
 | bcrypt | 5.0.0 |
 | httpx2 | 2.13.1 |
 | pytest | 9.1.1 |
@@ -45,6 +47,8 @@
 | ESLint | 10.11 |
 | TypeScript | 6.0 |
 | vue-tsc | 3.3 |
+| Vitest / jsdom | 5.0 / 30.1 |
+| @vue/test-utils / @vitejs/plugin-vue | 2.5 / 6.0 |
 
 ## 사전 요구사항 (최초 1회)
 
@@ -87,7 +91,7 @@ cd frontend
 pnpm dev
 ```
 
-브라우저에서 http://localhost:5173 접속 → **로그인 화면**이 뜬다.
+브라우저에서 http://localhost:5173 접속 → 로그인 없이 **공개 홈 화면**이 뜬다. `admin`(비밀번호는 `backend/.env` 의 `DEFAULT_ADMIN_PASSWORD`)으로 로그인하면 상단에 **관리자 콘솔** 링크가 생긴다.
 
 ### 기본 인증 / 계정
 
@@ -99,9 +103,29 @@ pnpm dev
 - 로그인하면 **access JWT(15분, 메모리, `sid` 클레임)** 와 **refresh HttpOnly 쿠키(`refresh_token`, `Path=/api/v1/auth`, DB `auth_sessions`, 회전)** 가
   발급된다(`REFRESH_TOKEN_TRANSPORT=cookie` — 응답 본문의 `refresh_token` 은 `null`). 로그아웃하면 세션이 폐기돼 access 토큰도 즉시 401 이 된다.
   상세는 `ARCHITECTURE.md` §9·§14.
-- 흐름: **미인증 → `/login`** → 로그인 성공 → **메인(`/`)** → 랜딩(`/landing`, 시스템 상태) / **My(`/my`, 내 정보·로그아웃)**.
+- 흐름: 첫 화면 `/` 는 **공개**다. 로그인이 필요한 화면(`/me`, `/admin/**`)에 들어가면 `/login?next=<원래 위치>` 로 갔다가 로그인 후 그 위치로 돌아온다. 화면 목록은 아래 "화면 구성".
 - `users` 테이블은 `role`(일반 `user` / 관리자 `admin`)로 권한을 구분한다. 관리자 전용 API 는 `require_admin` 의존성으로 보호한다.
 - 로그인 브루트포스 방어(429)는 **DB `login_throttles`** 의 계정별 잠금이다 — 연속 `LOGIN_MAX_FAILURES`(5)회 실패 시 `LOGIN_LOCKOUT_MINUTES`(15)분 잠금, 다중 워커에서도 공유된다(§9).
+
+## 화면 구성
+
+프론트엔드는 **공개 사용자 화면**(`app/layouts/default.vue`)과 **관리자 콘솔**(`app/layouts/admin.vue`) 두 레이아웃으로 나뉜다. 라우트는 `frontend/app/pages/` 파일 구조 그대로이고, 상세 규칙은 [`ARCHITECTURE.md` §14 "화면 구성 · 레이아웃 · 관리자 가드"](ARCHITECTURE.md#14-프론트엔드-인증-흐름)를 따른다.
+
+| 영역 | 경로 | 내용 |
+|------|------|------|
+| 사용자 (상단 내비) | `/` | 배너 캐러셀(없으면 기본 히어로) · 주요 서비스 · 최신 공지 · 내 계정 |
+| | `/notices`, `/notices/:id` | 공지 목록(고정·검색·페이지) · 상세(본문·첨부 다운로드) |
+| | `/login`, `/me` | 로그인(`?next=` 로 원래 위치 복귀) · 내 정보/로그아웃(로그인 필요) |
+| 관리자 콘솔 (사이드바) | `/admin` | 대시보드 — 사용자·세션·잠금·공지·배너·DB 상태 |
+| | `/admin/notices` | 공지 작성·수정(리치 텍스트 에디터 — 이미지·유튜브), 첨부 업로드·다운로드, 저장 안 한 변경 이탈 확인 |
+| | `/admin/banners` | 배너 이미지 업로드, 링크·노출 기간, 활성 토글, 순서 변경 |
+| | `/admin/users`, `/admin/sessions`, `/admin/login-throttles` | 권한·활성 변경, 세션 강제 종료, 로그인 잠금 해제 |
+| | `/admin/system` | 백엔드·DB 헬스 체크, Alembic 리비전 |
+
+- `/admin/**` 는 `middleware/admin.ts` 가 지킨다 — 비로그인이면 로그인 화면으로, 로그인했지만 관리자가 아니면 403 화면. 권한 경계는 백엔드(`/api/v1/admin/*` 의 `require_admin`)다.
+- 디자인 토큰은 `DESIGN.md` → `frontend/app/assets/css/main.css` 의 `@theme` 다. 화면의 `[대괄호]` 문구(히어로·서비스 카드·푸터)와 자리표시 메뉴(서비스·고객지원)는 프로젝트에 맞게 바꾼다.
+- 업로드 파일은 백엔드 `UPLOAD_DIR`(기본 `backend/uploads/`, 커밋 금지)에 저장된다. 개발 서버는 `nitro.devProxy` 로 `/api` 와 `/uploads` 를 백엔드로 프록시한다.
+  운영(`pnpm generate` 정적 산출)에서는 리버스 프록시가 같은 오리진의 `/api`·`/uploads` 를 백엔드로 넘기거나, 백엔드 `.env` 의 `PUBLIC_FILES_BASE_URL` 에 백엔드 공개 주소를 넣는다.
 
 ## DB 스키마 변경 (ARCHITECTURE.md §11)
 
@@ -119,10 +143,11 @@ cd backend
 .\.venv\Scripts\python -m ruff check .       # 백엔드 린트 (ruff)
 cd ..\frontend; pnpm lint                     # 프론트 린트 (eslint)
 pnpm typecheck                                 # 프론트 타입 체크 (nuxt typecheck)
+pnpm test                                      # 프론트 단위 테스트 (vitest — lib 순수 모듈·에디터 컴포넌트)
 ```
 
 ## CI (ARCHITECTURE.md §20)
 
-`.github/workflows/ci.yml` 이 push/PR(main) 마다 자동 실행한다 — 백엔드(ruff + pytest) / 프론트(eslint + nuxt typecheck + build).
+`.github/workflows/ci.yml` 이 push/PR(main) 마다 자동 실행한다 — 백엔드(ruff + pytest) / 프론트(eslint + nuxt typecheck + vitest + build).
 CI는 push 이후 도는 **사후 안전망**이다. ⛔ 게이트는 push 전 로컬 검증(위 명령)이며, `main` 직접 커밋이 기본이고 브랜치·PR은 선택이다.
 협업자가 생기면 `main` 브랜치 보호와 CI 필수 검사를 켜고 PR 흐름을 기본으로 되돌린다.

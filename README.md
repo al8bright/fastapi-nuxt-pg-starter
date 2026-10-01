@@ -216,7 +216,7 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
 ## 생성 직후
 
 1. 스크립트가 출력한 대로 백엔드(`uvicorn`)·프론트(`pnpm dev`)를 실행
-2. 브라우저 http://localhost:5173 → 랜딩 페이지에서 **백엔드·DB 연결 상태**가 "정상"이면 성공
+2. 브라우저 http://localhost:5173 → 공개 홈 화면이 보이면 성공. `admin` 으로 로그인해 **관리자 콘솔 › 시스템 상태**에서 백엔드·DB 연결이 "정상"인지 확인
 3. AI 에이전트에게: "`AGENTS.md`·`ARCHITECTURE.md`·`PLAN.md` 따라 개발 시작" → TDD(Red→Green→Refactor)
 
 ## 기준이 바뀌면
@@ -229,6 +229,16 @@ chmod +x scaffold.sh          # 최초 1회 (실행 권한이 없을 때)
 > 전역 설정(`~/.claude/CLAUDE.md` 등) 없이도 어떤 에이전트든 같은 규칙을 따르게 하기 위해서다.
 
 ## 검증 상태
+
+**2026-10-02 사용자 화면·관리자 콘솔·리치 에디터 이식 검증** (Windows 11, Node 24.14.0 / pnpm 11.28.3) —
+`scaffold.ps1 -SkipDb -NoDesign` 으로 만든 임시 프로젝트 + PostgreSQL 16(docker)에서 확인했다.
+
+- 백엔드(공통 백엔드, 공지·배너·첨부·업로드·관리자 API): `ruff check .` 통과, `pytest -q` 319건 통과, `alembic upgrade head`(→ `0004_notices_banners`)
+- 프론트: `pnpm lint` · `pnpm typecheck` · `pnpm test`(vitest 195건) · `pnpm build` · `pnpm generate` 모두 exit 0, install 후 `package.json`·`pnpm-workspace.yaml` 변경 없음
+- 실구동(Nuxt dev 출처 → devProxy `/api`·`/uploads` → uvicorn): 관리자 로그인·쿠키 refresh, 에디터 이미지 업로드와 `/uploads` 프록시, 공지 작성(본문 정화)·첨부(한글 파일명)·게시,
+  공개 목록·상세·첨부 다운로드, 배너 이미지·생성·순서·`GET /banners`, 대시보드·사용자·세션·로그인 잠금 API, SPA 경로(`/`·`/notices`·`/admin/**`·`/login`·`/me`) 응답 확인
+- 브라우저(headless Chrome): 비관리자 `/admin` → 403, 비로그인 → `/login?next=` 복귀, 관리자 화면 전부 렌더, 에디터 이미지 선택·크기 프리셋 커밋(`insertHTML`),
+  이탈 확인 다이얼로그, 새 공지 저장 → 수정 화면 전환, 배너 활성 토글, 새로고침 후 세션 복원 — 콘솔 오류·경고 없음
 
 **2026-10-02 공통 백엔드 교체 검증** (Windows 11, Python 3.13.14 / pnpm 11.28.3) —
 `scaffold.ps1 -SkipDb -NoDesign` 으로 만든 임시 프로젝트 + PostgreSQL 16(docker)에서 확인했다.

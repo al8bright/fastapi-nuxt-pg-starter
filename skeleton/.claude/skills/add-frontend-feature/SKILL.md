@@ -142,12 +142,22 @@ description: __PROJECT_NAME__ 프론트엔드에 기능·페이지·API 호출�
 
 5. **라우트** `frontend/app/pages/` — Nuxt **파일 기반 라우팅**
    - 파일 경로 = URL. `app/pages/events.vue` → `/events`, `app/pages/events/[id].vue` → `/events/:id`.
-   - 인증이 필요한 화면은 페이지 최상단에서 미들웨어를 선언한다 — 미인증 시 `/login` 리다이렉트(§14).
+   - 첫 화면 `/`·공지(`/notices`)처럼 **공개 화면은 가드가 없다**. 로그인이 필요한 화면은 페이지 최상단에서 미들웨어를 선언한다
+     — 미인증 시 `/login?next=<원래 위치>` 로 보내고 로그인 후 돌아온다(§14).
    ```vue
    <script setup lang="ts">
-   definePageMeta({ middleware: "auth" })   // ← app/middleware/auth.ts
+   definePageMeta({ middleware: "auth" })   // ← app/middleware/auth.ts (로그인만 필요)
    </script>
    ```
+   - **관리자 화면**은 `app/pages/admin/` 아래에 두고 레이아웃과 가드를 함께 선언한다 — 비로그인 → 로그인, role≠admin → 403(`app/error.vue`).
+     사이드바 메뉴는 `app/lib/adminNav.ts` 에 함께 등록한다.
+   ```vue
+   <script setup lang="ts">
+   definePageMeta({ layout: "admin", middleware: "admin" })   // ← app/layouts/admin.vue + app/middleware/admin.ts
+   </script>
+   ```
+   - 저장하지 않은 입력이 있는 폼은 `onBeforeRouteLeave`(확인 다이얼로그의 답을 기다리는 Promise 반환) + `beforeunload` 로 이탈을 막는다
+     (`app/components/admin/NoticeForm.vue` 참고).
    - `definePageMeta` 는 **컴파일 타임에 추출**된다 → 인자에 런타임 변수를 넣지 말고 리터럴로 쓴다.
    - 내부 이동은 **`<NuxtLink to="/events">`**, 스크립트에서는 **`navigateTo("/events")`** 를 쓴다.
      ⛔ `<a href>` 로 내부 링크를 걸면 전체 새로고침이 된다.
@@ -162,19 +172,29 @@ description: __PROJECT_NAME__ 프론트엔드에 기능·페이지·API 호출�
      `POST /auth/refresh` 로 세션을 복원한다. 새 기능에서 따로 복원 로직을 만들지 마라.
    ```ts
    // app/middleware/auth.ts
+   import { loginPath } from "~/lib/returnTo"
    export default defineNuxtRouteMiddleware((to) => {
      if (!import.meta.client) return
      const auth = useAuthStore()
-     if (!auth.isAuthenticated && to.path !== "/login") return navigateTo("/login", { replace: true })
+     if (!auth.isAuthenticated) return navigateTo(loginPath(to.fullPath), { replace: true })   // /login?next=…
    })
    ```
    - ⚠️ 미들웨어는 **클라이언트일 때만** 리다이렉트한다 — `nuxt generate` 의 정적 생성 단계는 Node 에서 돌아 인증 상태가 없다.
    - **401 은 `app/plugins/api.ts` 가 일괄 처리**한다 — **refresh 1회(single-flight) 후 원 요청 재시도**, 실패 시
-     세션 제거 + `/login` 이동. ⛔ 개별 API 함수·컴포넌트에서 401 이나 refresh 를 따로 처리하지 마라.
+     세션 제거 + (로그인 필요 화면이면) `/login?next=` 이동. ⛔ 개별 API 함수·컴포넌트에서 401 이나 refresh 를 따로 처리하지 마라.
    - Bearer 주입도 마찬가지로 `onRequest` 인터셉터가 담당한다 — 호출부에서 헤더를 직접 붙이지 않는다.
    - 로그인 성공 시에는 Pinia `auth` 스토어의 **`setSession(accessToken)` 하나만** 부른다 — 메모리 상태를 갱신한다
      (refresh 쿠키는 응답 `Set-Cookie` 로 자동 저장). 이어서 `setUser(await getMe())` 로 사용자 정보를 채운다.
-   - 로그아웃은 `POST /auth/logout`(서버가 세션 revoke + 쿠키 삭제) 후 `auth.clearSession()`.
+   - 로그아웃은 `useLogout()` — `POST /auth/logout`(서버가 세션 revoke + 쿠키 삭제) 후 스토어·`clearNuxtData()` 를 비우고 홈으로.
+
+7. **업로드·파일 URL·오류 문구**
+   - 업로드는 공용 `$api` 로 `FormData` 필드 `file`(`app/api/common.ts` 의 `fileForm()`) — Bearer·401 refresh 가 그대로 적용된다.
+     Bearer 가 필요한 다운로드는 `$api<Blob>(url, { responseType: "blob" })` + `lib/download.ts` 의 `saveBlob()`.
+   - 백엔드가 주는 파일 URL(`/uploads/...`)은 템플릿에서 `useFileUrl()` 을 거쳐 쓴다(API 를 다른 오리진에 둔 경우 보정). dev 는 devProxy `/uploads`.
+   - 실패 문구는 `lib/apiError.ts` 의 `apiErrorMessage(e)`(도메인 `code`·413·422 배열 detail). 새 도메인 오류 코드를 만들면 `MESSAGE_BY_CODE` 에 문구를 추가한다.
+   - 명령(생성·수정·삭제)은 `useAction()` 으로 감싸 `isPending` 을 얻고, 끝나면 `invalidate*()`(=`refreshDataByPrefix`)로 화면에 떠 있는 관련 키를 다시 부른다.
+   - 리치 텍스트 본문은 `<EditorRichTextEditor :upload-image="useEditorImageUpload()" @change=…>` 로 받고, 보기는 `<RichContent :html>` 에
+     **서버가 정화해 돌려준 HTML 만** 넣는다. 에디터 서식을 늘리면 백엔드 `core/sanitize.py` 허용 목록과 테스트를 같은 변경에서 고친다.
 
 ## 스타일 (§15)
 - Tailwind v4 CSS-first(`@import "tailwindcss"` + `@theme`, `app/assets/css/main.css`). 별도 `tailwind.config.js` 지양.
@@ -193,4 +213,6 @@ description: __PROJECT_NAME__ 프론트엔드에 기능·페이지·API 호출�
 - ⛔ `server/` 라우트·서버 미들웨어 등 **서버 전용 기능 금지** — 정적 SPA 라 실행될 서버가 없다([stack-versions]).
 
 ## 마무리
-- 린트 경고 0 + `pnpm typecheck`(`nuxt typecheck` = vue-tsc) 통과 + `pnpm build` 성공 + 동작 확인 후 커밋. 커밋/PR은 [pr-workflow] 스킬 참조.
+- 순수 로직(`app/lib/**`)과 Nuxt 자동 import 에 기대지 않는 컴포넌트는 옆에 `*.test.ts`(vitest + `@vue/test-utils`)를 둔다 → `pnpm test`.
+  페이지·`useAsyncData` 컴포저블은 Nuxt 런타임이 필요해 vitest 대상이 아니다 — 실제 백엔드를 붙인 `pnpm dev` 로 확인한다(ARCHITECTURE.md §13 "프론트 테스트").
+- 린트 경고 0 + `pnpm typecheck`(`nuxt typecheck` = vue-tsc) 통과 + `pnpm test` 통과 + `pnpm build` 성공 + 동작 확인 후 커밋. 커밋/PR은 [pr-workflow] 스킬 참조.

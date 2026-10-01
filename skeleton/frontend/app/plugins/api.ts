@@ -1,5 +1,6 @@
 import { FetchError } from "ofetch"
 import type { TokenResponse } from "~/api/auth"
+import { loginPath, requiresLogin } from "~/lib/returnTo"
 
 // HTTP 클라이언트 (ARCHITECTURE.md §13). axios 대신 Nuxt 내장 $fetch(ofetch)를 쓴다.
 // $fetch.create 인스턴스를 provide 하면 컴포저블에서 useNuxtApp().$api 로 꺼내 쓸 수 있다.
@@ -57,7 +58,7 @@ export default defineNuxtPlugin(() => {
     },
   })
 
-  // 래퍼: 401 → refresh 1회 → 원 요청 1회 재시도. refresh 실패 시 로그인 화면으로.
+  // 래퍼: 401 → refresh 1회 → 원 요청 1회 재시도. refresh 실패 시 (보호 화면이면) 로그인 화면으로.
   const api = (async (request: Parameters<typeof $fetch>[0], options?: Parameters<typeof $fetch>[1]) => {
     try {
       return await instance(request, options)
@@ -67,9 +68,14 @@ export default defineNuxtPlugin(() => {
 
       const accessToken = await refreshAccessToken(baseURL)
       if (accessToken === null) {
-        // refresh 실패 = 세션 만료. 상태를 비우고 로그인 화면으로 보낸다.
+        // refresh 실패 = 세션 만료. 상태를 비우고, 로그인이 필요한 화면(/admin/**, /me)에 있었다면
+        // 원래 위치(next)를 담아 로그인 화면으로 보낸다. 공개 화면(/, /notices)은 그대로 둔다.
+        // 하드 이동(location.href)이라 메모리의 조회 캐시도 함께 사라진다.
         authStore.logout()
-        if (import.meta.client && location.pathname !== "/login") location.href = "/login"
+        if (import.meta.client) {
+          const here = `${location.pathname}${location.search}${location.hash}`
+          if (requiresLogin(location.pathname)) location.href = loginPath(here)
+        }
         throw error
       }
 

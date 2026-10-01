@@ -1,5 +1,5 @@
-import { FetchError } from "ofetch"
 import { useAuthApi } from "~/api/auth"
+import { httpErrorInfo } from "~/lib/apiError"
 
 // 인증 컴포저블 (ARCHITECTURE.md §13, §14).
 // Nuxt 판은 쿼리 라이브러리(react-query/svelte-query) 대신 내장 useAsyncData 를 쓴다.
@@ -24,17 +24,27 @@ export function useMe() {
   )
 }
 
-const LOGIN_FAILED_MESSAGE = "아이디 또는 비밀번호가 올바르지 않습니다."
-// 429 = 백엔드 DB 스로틀(login_throttles)의 계정별 잠금. Retry-After 헤더가 없으므로 남은 시간은 표시하지 않는다.
-const LOGIN_LOCKED_MESSAGE = "로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요."
-const LOGIN_UNAVAILABLE_MESSAGE = "로그인에 실패했습니다. 잠시 후 다시 시도하세요."
+/** 서버 `detail` 이 문자열일 때만 살린다 (FastAPI 422 는 객체 배열이라 그대로 보여줄 수 없다). */
+function serverDetail(data: unknown): string | null {
+  const detail = (data as { detail?: unknown } | undefined)?.detail
+  return typeof detail === "string" && detail.trim() !== "" ? detail : null
+}
 
-function loginErrorMessage(error: unknown): string {
-  if (error instanceof FetchError) {
-    if (error.status === 429) return LOGIN_LOCKED_MESSAGE
-    if (error.status === 401 || error.status === 422) return LOGIN_FAILED_MESSAGE
-  }
-  return LOGIN_UNAVAILABLE_MESSAGE
+/**
+ * 로그인 실패 원인을 상태코드로 구분해 사용자 문구로 바꾼다.
+ * 모든 실패를 "아이디 또는 비밀번호" 로 표시하면 422·네트워크 오류·500 을 오진한다.
+ */
+export function loginErrorMessage(error: unknown): string {
+  const info = httpErrorInfo(error)
+  if (!info) return "알 수 없는 오류가 발생했습니다."
+  if (info.status === null) return "서버에 연결할 수 없습니다. 백엔드가 실행 중인지 확인하세요."
+  // 401 문구는 고정 — 계정 존재 여부를 노출하지 않는다(백엔드도 메시지를 통일한다).
+  if (info.status === 401) return "아이디 또는 비밀번호가 올바르지 않습니다."
+  // 429 = 백엔드 DB 스로틀(login_throttles)의 계정별 잠금. 비밀번호 오류와 구분해 안내한다.
+  if (info.status === 429) return "로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요."
+  if (info.status === 422) return serverDetail(info.data) ?? "입력값을 확인하세요. (비밀번호는 UTF-8 기준 72 bytes 이하)"
+  if (info.status >= 500) return "서버 오류가 발생했습니다. 잠시 후 다시 시도하세요."
+  return serverDetail(info.data) ?? "로그인 처리 중 오류가 발생했습니다."
 }
 
 /** 로그인 → access 토큰을 스토어(메모리)에 저장 → 사용자 정보 로드 (mutation 대응).
@@ -66,7 +76,11 @@ export function useLogin() {
   return { mutate, isPending, isError, errorMessage }
 }
 
-/** 로그아웃 → 서버 세션 revoke + 쿠키 삭제(서버는 항상 204, 네트워크 실패는 무시) → 상태 초기화 → 로그인 화면 */
+/**
+ * 로그아웃 → 서버 세션 revoke + 쿠키 삭제(서버는 항상 204, 네트워크 실패는 무시) → 상태·조회 캐시 초기화 → 홈.
+ * 캐시(useAsyncData)를 남기면 다음 사용자가 이전 사용자의 관리자 목록 등을 잠깐 볼 수 있다 — 전부 비운다.
+ * 첫 화면(/)은 공개라 로그아웃 뒤에는 홈으로 간다.
+ */
 export function useLogout() {
   const { logout } = useAuthApi()
   const authStore = useAuthStore()
@@ -78,8 +92,8 @@ export function useLogout() {
       // 네트워크 실패는 무시 — 로컬 상태는 어차피 비운다. 서버에 남은 세션은 만료 시 거부된다.
     }
     authStore.logout()
-    clearNuxtData("auth:me") // useMe 캐시도 비워 다음 로그인 때 재조회하게 한다.
-    await navigateTo("/login", { replace: true })
+    clearNuxtData()
+    await navigateTo("/", { replace: true })
   }
 
   return { mutate }

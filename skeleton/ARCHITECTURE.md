@@ -107,7 +107,8 @@
 │   ├── alembic.ini
 │   ├── requirements.txt
 │   ├── pytest.ini
-│   └── tests/
+│   ├── tests/
+│   └── uploads/                 # UPLOAD_DIR 기본값 — 업로드 파일(public/·private/), .gitignore 대상
 ├── frontend/
 │   ├── app/
 │   ├── package.json
@@ -140,22 +141,36 @@ backend/app/
 ├── api/
 │   ├── v1/                 # ★ /api/v1 버전 디렉토리
 │   │   ├── router.py       # 하위 라우터 집계
-│   │   ├── auth.py         # login / refresh / logout / me (자체 계정) 또는 SSO 시작·콜백
+│   │   ├── auth.py         # 자체 계정 /auth/login·refresh·logout·me; SSO는 도입 시 확장
 │   │   ├── health.py
+│   │   ├── notices.py      # 공개 공지 목록·상세·첨부 다운로드
+│   │   ├── banners.py      # 공개 배너(노출 기간 안의 활성 배너)
+│   │   ├── admin/          # /admin/* — 라우터 단위 require_admin (dashboard·users·notices·banners·editor)
 │   │   └── <domain>.py     # 도메인별 APIRouter (얇은 HTTP 계층)
-│   └── ...
+│   ├── errors.py           # ServiceError·StorageError → HTTP 상태 변환표(전역 핸들러)
+│   └── files.py            # 첨부 다운로드 응답(Content-Disposition), 업로드 크기 제한 읽기
 ├── core/
-│   └── security.py         # JWT 생성/검증, now() (KST naive)
+│   ├── security.py         # access JWT·refresh 불투명 토큰, 비밀번호 정책, now() (KST naive)
+│   ├── storage.py          # UPLOAD_DIR 로컬 저장소 — 이미지 검증·재인코딩, 첨부 허용 목록, 키 해석 (§8)
+│   └── sanitize.py         # 리치 텍스트 본문 HTML 정화(nh3 허용 목록) (§8)
 ├── db/
 │   ├── base.py             # DeclarativeBase (Base)
 │   ├── engine.py           # 엔진 팩토리 (SQLite/PG 분기, KST connect_args)
 │   └── session.py          # get_db 세션 / SessionLocal
 ├── models/
 │   ├── __init__.py         # 모든 모델 re-export (Alembic/메타데이터 등록용)
+│   ├── auth_session.py     # AuthSession(refresh 세션) + LoginThrottle(로그인 시도 제한) (§9)
+│   ├── notice.py           # Notice + NoticeAttachment
+│   ├── banner.py           # Banner
 │   └── <domain>.py
 ├── schemas/
 │   └── <domain>.py         # Pydantic BaseModel (요청/응답)
 └── services/
+    ├── session_service.py  # refresh 세션 생성·회전·폐기 (§9)
+    ├── notice_service.py   # 공지 — 저장 직전 sanitize_html, 게시일·조회수, 첨부
+    ├── banner_service.py   # 배너 — 노출 기간 판정, 이미지 key 검증, 순서
+    ├── admin_service.py    # 대시보드 집계, 사용자 권한·활성(자기 강등·마지막 관리자 보호), 세션·스로틀 관리
+    ├── upload_service.py   # 공개 이미지 업로드(에디터·배너) 응답 조립
     ├── <domain>_service.py # 비즈니스 로직
     └── exceptions.py       # ServiceError 등 도메인 예외
 ```
@@ -376,6 +391,60 @@ class Order(Base):
 - 함수형 서비스(`def create_order(db, user, data)`)를 기본으로 한다.
 - 실패는 `ServiceError(code=...)` 같은 **도메인 예외**로 던지고, 라우터에서 HTTP로 변환.
 - N+1 방지: 조회 시 `selectinload` 등 명시적 로딩 옵션.
+- `ServiceError(code)`(와 저장소의 `StorageError`)는 `app/api/errors.py` 의 전역 핸들러가 `STATUS_BY_CODE` 표로 HTTP 상태를 정한다(`not_found` 404, `self_modification`·`last_admin`·`too_many_attachments` 409, `file_too_large` 413, 검증류 422, 표에 없으면 400). 응답 본문은 `{"detail": <메시지>, "code": <코드>}`. 인증 라우터(`auth.py`)는 401/429 와 쿠키·헤더가 얽혀 있어 직접 변환한다.
+
+### 기본 제공 테이블
+
+| 테이블 | 리비전 | 용도 |
+|--------|--------|------|
+| `app_meta` | `0001_initial` | 연결 확인용 샘플(`/health/db`) |
+| `users` | `0002_users` | 자체 계정 — `role`(`user`/`admin`), `is_active` |
+| `auth_sessions`, `login_throttles` | `0003_auth_sessions` | refresh 세션(해시만 저장), 계정별 로그인 실패 카운터 (§9) |
+| `notices` | `0004_notices_banners` | 공지 — `body_html`(저장 시 정화), `is_pinned`, `is_published`, `published_at`(처음 게시 때 1회), `view_count`, `author_id`(FK users, `SET NULL`) |
+| `notice_attachments` | 〃 | 공지 첨부 — `notice_id`(FK, `CASCADE`), `storage_key`(private 키), `original_name`, `content_type`, `size_bytes`. 공지당 최대 10개 |
+| `banners` | 〃 | 배너 — `image_key`(public/banners 키)·`image_width/height`(서버가 잰 값), `link_url`(http(s) 또는 `/` 내부 경로만), `alt_text`, `starts_at`/`ends_at`(노출 기간, NULL=무제한), `sort_order`, `is_active` |
+
+### 파일 업로드 · 저장소 · 본문 HTML 정화
+
+**저장소(`core/storage.py`)** — 업로드 파일은 `UPLOAD_DIR`(기본 `backend/uploads/`, 상대 경로는 backend 기준) 아래에 **서버가 만든 키**로만 저장한다. 사용자 파일명은 디스크 경로에 쓰지 않는다.
+
+| 키 | 내용 | 노출 |
+|----|------|------|
+| `public/editor/YYYY/MM/DD/<uuid>.<ext>` | 에디터 본문 이미지 | `/uploads/public/...` 정적 서빙 (`Cache-Control: public, max-age=31536000, immutable`) |
+| `public/banners/YYYY/MM/DD/<uuid>.<ext>` | 배너 이미지 | 〃 |
+| `private/attachments/YYYY/MM/DD/<uuid>.<ext>` | 공지 첨부(원본 파일명은 DB) | ⛔ 정적 서빙 금지 — 다운로드 API 로만 |
+
+- **이미지**: 매직 바이트 + Pillow 로 실제 이미지인지 확인(PNG·JPEG·WebP·GIF 만, SVG·BMP 등 거부, 4천만 픽셀 초과 거부) → EXIF 방향 반영 → 긴 변 `MAX_LONG_EDGE`(2000px) 초과 시 축소 → **메타데이터 없이 재인코딩**(EXIF·위치 정보 제거). **GIF 는 애니메이션 보존을 위해 재인코딩하지 않고 그대로** 저장한다(크기 상한은 업로드 용량 제한). 애니메이션 WebP 는 첫 프레임만 남는다. 상한 `MAX_IMAGE_UPLOAD_MB`(5).
+- **첨부**: 확장자 허용 목록(`pdf hwp hwpx doc docx xls xlsx ppt pptx txt csv zip png jpg jpeg`), `Content-Type` 은 클라이언트 값이 아니라 확장자 표로 정한다. 상한 `MAX_ATTACHMENT_UPLOAD_MB`(20). 다운로드는 `Content-Disposition: attachment; filename="<ASCII 대체>"; filename*=UTF-8''<RFC 5987>` + `nosniff` + `Cache-Control: private, no-store`.
+- **경로 탈출 방지**: 키는 정규식(`(public/(editor|banners)|private/attachments)/YYYY/MM/DD/<32hex>.<ext>`)에 맞아야 해석하고, 해석된 경로가 `UPLOAD_DIR` 안인지 다시 확인한다. 정적 마운트 루트가 `UPLOAD_DIR/public` 이라 `../` 로도 private 에 닿지 않는다.
+- **URL**: 응답의 공개 파일 URL = `PUBLIC_FILES_BASE_URL` + `/uploads/` + key. 비우면 루트 상대(`/uploads/public/...`) — 프론트엔드가 같은 오리진이거나 `/uploads` 를 백엔드로 프록시할 때. 다른 오리진·BFF 구성은 백엔드 공개 주소를 넣는다. 첨부 `download_url` 도 같은 접두사를 쓴다.
+- **삭제**: 공지·첨부·배너 행을 지우면 커밋 후 파일도 지운다(배너 이미지는 다른 배너가 같은 키를 참조하지 않을 때만). 에디터 본문 이미지는 본문 HTML 이 참조하므로 자동으로 지우지 않는다 — 고아 파일 정리는 별도 배치 몫.
+- 업로드 크기는 핸들러가 상한+1 바이트까지만 읽어 판정한다. multipart 본문 자체는 그 전에 임시 파일로 받아지므로, 운영에서는 앞단 프록시(nginx `client_max_body_size` 등)에도 상한을 둔다.
+
+**본문 HTML 정화(`core/sanitize.py`, nh3)** — 리치 텍스트 본문은 **서비스 계층이 저장 직전에** `sanitize_html` 을 거친다(클라이언트를 믿지 않는다). 보기 화면에는 서버가 정화해 돌려준 HTML 만 넣는다.
+
+- 허용 태그: `p div br hr span h1–h6 strong b em i u s strike sub sup mark small ul ol li blockquote pre code a img table thead tbody tfoot tr th td caption colgroup col iframe`
+- 허용 속성: 모든 태그 `class`(값은 `align-left align-center align-right video` 만, 남는 값이 없으면 속성 제거) · `a`: `href target title` · `img`: `src alt width height title` · `iframe`: `src width height title allowfullscreen` · `div`: `data-youtube-video` · `td/th`: `colspan rowspan scope` · `ol`: `start` · `col`: `span`. `width/height` 는 1~4자리 정수만.
+- `iframe[src]` 는 `^https://www\.youtube(?:-nocookie)?\.com/embed/[A-Za-z0-9_-]{11}$` 만 — 그 외(다른 호스트, 쿼리 문자열)는 iframe 을 **내용째** 지운다. 남는 iframe 에는 `sandbox="allow-scripts allow-same-origin allow-popups allow-presentation"`·`loading="lazy"`·`referrerpolicy="strict-origin-when-cross-origin"` 를 강제한다.
+- URL 스킴 `http https mailto tel`(+상대 경로)만 — `javascript:`·`data:` 는 제거. `a` 에는 `rel="noopener noreferrer"` 강제.
+- `style`·`id`·`on*`·`srcdoc`·편집 전용 속성(`contenteditable`, `data-selected` 등)은 제거, `script`·`style` 은 내용째 제거.
+- 정화 후 글자·`src` 있는 `img`·`iframe` 이 하나도 없으면 빈 본문으로 422.
+- ⚠️ **에디터와 정화 허용 목록은 한 쌍이다.** 에디터에 서식·미디어를 추가하면 허용 목록과 `tests/test_sanitize.py` 를 같은 변경에서 고친다(허용 목록을 넓힐 땐 테스트를 먼저).
+
+### 공지·배너·관리자 API 요약
+
+| 경로 (`/api/v1` 기준) | 인증 | 설명 |
+|------|------|------|
+| `GET /notices?page&size&q` · `GET /notices/{id}` · `GET /notices/{id}/attachments/{aid}` | 없음 | 게시된 공지만(초안은 404). 고정 먼저 → 게시일 최신순. 상세 조회 시 `view_count` +1 |
+| `GET /banners` | 없음 | `is_active` + 노출 기간 안(KST 현재) — `sort_order`, `id` 순 |
+| `/admin/*` | `require_admin` | 라우터 단위 의존성 — 비로그인 401, 일반 사용자 403. 역할은 요청마다 DB 에서 읽어 강등 즉시 403 |
+| `GET /admin/dashboard` | 〃 | 사용자·세션·잠금·공지·배너 집계 + DB 상태 + Alembic 리비전 |
+| `GET /admin/users` · `PATCH /admin/users/{id}` · `DELETE /admin/users/{id}/sessions` | 〃 | 자기 강등·비활성화 금지, 마지막 활성 관리자 보호(409). 비활성화 시 세션 전부 폐기 |
+| `GET /admin/sessions` · `DELETE /admin/sessions/{id}` | 〃 | 살아 있는 세션 목록·강제 폐기 |
+| `GET /admin/login-throttles` · `DELETE /admin/login-throttles/{username}` | 〃 | 잠금·최근 24시간 실패 목록, 잠금 해제 |
+| `/admin/notices`(CRUD) · `/admin/notices/{id}/attachments` | 〃 | 저장 시 본문 정화, 첨부 업로드(multipart `file`)·다운로드·삭제 |
+| `/admin/banners`(CRUD) · `POST /admin/banners/image` · `PATCH /admin/banners/order` | 〃 | 이미지 먼저 업로드 → `image_key` 로 참조 |
+| `POST /admin/editor/images` | 〃 | multipart `file` → `{key, url, width, height}` |
 
 ---
 
@@ -516,6 +585,7 @@ CSP 는 `/docs`·`/redoc` 의 CDN·인라인 스크립트를 막으므로 백엔
   - `client`: `app.dependency_overrides[get_db]`를 적용한 기본 API 클라이언트(conftest 는 `REFRESH_TOKEN_TRANSPORT=body` 로 고정).
   - `lifespan_client`: 기동·종료 훅과 기본 관리자 시드·경고를 검증하는 클라이언트.
 - skeleton 의 인증 회귀는 `tests/test_auth.py`(로그인·`/auth/me`·`sid`), **`tests/test_auth_sessions.py`**(refresh 회전·재사용 감지 시 세션 폐기·동시 갱신 60초 유예·절대 수명 비연장·로그아웃 멱등·즉시 무효화·로그인 스로틀·비밀번호 정책), **`tests/test_auth_cookie_transport.py`**(이 템플릿이 쓰는 cookie 모드 — 쿠키 속성·회전·삭제·429·production 기동 거부)가 고정한다(§9).
+- 업로드·정화·공지·배너·관리자 회귀는 `tests/test_sanitize.py`(정화 허용 목록 표, §8)·`test_storage.py`(재인코딩·축소·EXIF 제거·GIF 원본 유지·허용 목록·경로 탈출)·`test_uploads_serving.py`(public 정적 서빙, private 미노출)·`test_notices.py`·`test_banners.py`·`test_admin.py` 가 고정한다. autouse 픽스처 `upload_dir` 이 `UPLOAD_DIR` 을 테스트별 `tmp_path` 로 돌려 저장소에 파일을 남기지 않고, `admin_headers`·`user_headers` 픽스처가 실제 로그인으로 Bearer 헤더를 만든다.
 
 ```python
 @pytest.fixture(autouse=True)
@@ -536,32 +606,58 @@ frontend/
 ├── .env.example                 # NUXT_PUBLIC_*
 ├── .gitignore                   # .nuxt/, .output/, dist/, node_modules/, .env 등
 ├── eslint.config.mjs            # @nuxt/eslint
-├── nuxt.config.ts               # ssr:false(SPA) + devServer.port 5173 + nitro.devProxy + runtimeConfig
+├── nuxt.config.ts               # ssr:false(SPA) + devServer.port 5173 + nitro.devProxy(/api·/uploads) + runtimeConfig
+├── vitest.config.ts             # 단위 테스트(jsdom) — app/lib/** 순수 모듈 + 에디터·RichContent 컴포넌트
 ├── package.json
 ├── pnpm-workspace.yaml          # allowBuilds 맵 (pnpm 11 의 빌드 스크립트 허용 키)
 ├── tsconfig.json                # .nuxt/tsconfig.*.json 4개를 참조만 하는 껍데기 (nuxt prepare 가 생성)
 ├── public/.gitkeep              # 정적 자산
 └── app/
     ├── app.vue                  # 앱 셸 — <NuxtLayout><NuxtPage /></NuxtLayout>
-    ├── assets/css/main.css      # Tailwind v4 @import + @theme 토큰 + body 스타일
+    ├── error.vue                # 오류 화면 — 404(사용자 레이아웃)·403(관리자 아님)·그 밖(새로고침 안내)
+    ├── assets/css/main.css      # Tailwind v4 @import + @theme 토큰(+ 확장 토큰 기본값) + .rich-text/.editor 본문 스타일
     ├── plugins/
-    │   ├── api.ts               # ★ $fetch.create + 인터셉터(access 주입/401→refresh 재시도) → provide('api', ...)
+    │   ├── api.ts               # ★ $fetch.create + 인터셉터(access 주입/401→single-flight refresh→1회 재시도) → provide('api')
     │   └── auth-init.ts         # 부팅 시 /auth/refresh 로 세션 복원 (SPA 새로고침 대응)
-    ├── api/
-    │   ├── auth.ts              # useAuthApi() — login()/getMe() + User/UserRole/TokenResponse 타입
-    │   └── health.ts            # useHealthApi() — getHealth()/getDbHealth() + DbHealth 타입
-    ├── composables/
-    │   ├── useAuth.ts           # useMe() = useAsyncData 래퍼 / useLogin() = 수동 뮤테이션 헬퍼
-    │   └── useHealth.ts         # useHealthStatus(), useDbHealthStatus()
+    ├── api/                     # ★ 도메인별 use<Domain>Api() + 타입 (명시 import)
+    │   ├── auth.ts · health.ts  # 인증·헬스
+    │   ├── common.ts            # Page<T>·PageParams·UploadedImage·cleanParams·fileForm(FormData `file`)
+    │   ├── notices.ts           # 공개 목록·상세 / 관리자 CRUD·첨부 업로드·blob 다운로드
+    │   ├── banners.ts           # 공개 배너 / 관리자 CRUD·이미지 업로드·순서
+    │   └── admin.ts             # 대시보드·사용자·세션·로그인 잠금
+    ├── composables/             # (자동 import)
+    │   ├── useAuth.ts           # useMe() / useLogin() / useLogout() / loginErrorMessage()
+    │   ├── useHealth.ts         # useHealthStatus(), useDbHealthStatus()
+    │   ├── useNotices.ts · useBanners.ts · useAdmin.ts  # 조회 = useAsyncData(키에 파라미터), invalidate*() = 관련 키 재조회
+    │   ├── useAction.ts         # useAction() — 명령(생성·수정·삭제·업로드)용 isPending/error 헬퍼, refreshDataByPrefix()
+    │   ├── useListParams.ts     # 목록 page·q 등을 URL 쿼리에
+    │   └── useUploads.ts        # useFileUrl()(파일 URL 보정) · useEditorImageUpload()($api 업로드 함수)
+    ├── lib/                     # (명시 import) Nuxt 런타임 없이 도는 순수 모듈 — vitest 대상
+    │   ├── apiError.ts          # FetchError·NuxtError → 한국어 문구(도메인 code·413·422 배열 detail)
+    │   ├── format.ts · linkUrl.ts · uploadRules.ts · bannerForm.ts  # 표시·검증(백엔드 규칙과 같은 값)
+    │   ├── returnTo.ts          # safeNext()(오픈 리다이렉트 차단) · loginPath() · requiresLogin()
+    │   ├── download.ts · site.ts · ui.ts · icons.ts · adminNav.ts  # blob 저장·사이트 이름·공용 클래스·아이콘·관리자 메뉴
+    │   └── editor/              # 리치 에디터 순수 로직(richText·imageTransform·mediaHtml·editorDom·imageCanvas·upload·toolbar)
     ├── stores/
-    │   └── auth.ts              # Pinia setup store — 전역 인증 상태 (access 토큰은 메모리에만, user)
+    │   └── auth.ts              # Pinia setup store — access 토큰(메모리)·user
     ├── middleware/
-    │   └── auth.ts              # 인증 가드 — 미인증이면 navigateTo('/login')
-    └── pages/
-        ├── index.vue            # /          메인            (definePageMeta 가드)
-        ├── login.vue            # /login     로그인 (가드 없음)
-        ├── landing.vue          # /landing   백엔드·DB 상태  (가드)
-        └── my.vue               # /my        내 정보·로그아웃 (가드)
+    │   ├── auth.ts              # 로그인 가드 — 미인증이면 /login?next=<원래 위치>
+    │   └── admin.ts             # 관리자 가드 — 미인증 → /login?next=…, role≠admin → 403(error.vue)
+    ├── layouts/
+    │   ├── default.vue          # 사용자 화면 — 상단 내비 + 계정 메뉴(관리자에게만 "관리자 콘솔")
+    │   └── admin.vue            # 관리자 콘솔 — 그룹형 사이드바(좁은 화면은 서랍)
+    ├── components/              # (자동 등록 — 폴더명이 접두사: ui/Chip.vue → <UiChip>)
+    │   ├── ui/                  # Icon·Chip·ConfirmDialog·Pagination·SearchForm·Loading·ErrorState·EmptyState·Notice
+    │   ├── layout/              # AccountMenu·AdminSidebar·PageHeader·SkipLink
+    │   ├── admin/               # NoticeForm(이탈 확인)·AttachmentsPanel·BannerForm
+    │   ├── editor/              # RichTextEditor 와 하위(Toolbar·MediaOverlay·ImageCropDialog·TextPromptDialog·EditorDialog)
+    │   ├── RichContent.vue      # 서버가 정화한 본문 HTML 보기
+    │   ├── BannerCarousel.vue   # 홈 배너 캐러셀(APG carousel)
+    │   └── HomeHero.vue         # 배너가 없을 때의 기본 히어로
+    └── pages/                   # 파일 라우팅 — 표는 §14 "화면 구성"
+        ├── index.vue · login.vue · me.vue · my.vue(→ /me)
+        ├── notices/index.vue · notices/[id].vue
+        └── admin/               # index·notices/(index·new·[id]/edit)·banners/(…)·users·sessions·login-throttles·system·[...slug]
 ```
 
 `app/plugins/api.ts` (`$fetch` 인스턴스 표준 — axios 대체):
@@ -590,7 +686,8 @@ export default defineNuxtPlugin(() => {
       const refreshed = await authStore.refreshOnce()   // 동시 401 은 하나의 refresh 로 합류
       if (!refreshed) {
         authStore.clearSession()
-        if (import.meta.client && location.pathname !== "/login") location.href = "/login"
+        // 로그인 필요 화면(/admin/**, /me)에 있었다면 /login?next=<원래 위치> 로 (공개 화면은 그대로)
+        if (import.meta.client && requiresLogin(location.pathname)) location.href = loginPath(location.pathname)
         return
       }
       // 새 access 토큰으로 원 요청 1회 재시도 (재귀 방지 플래그는 구현에서 관리)
@@ -722,7 +819,25 @@ export function useLogin() {
 - API 함수는 `app/api/<domain>.ts`에 모으고, 컴포넌트는 `app/composables/`의 컴포저블을 통해 접근한다.
 - ⚠️ auto-import 범위: `app/composables/*`·`app/stores/*` 는 자동, **`app/api/*`·`app/lib/*` 는 자동이 아니다**(명시 import).
 - ⚠️ `useLogin()` 처럼 **plain object 안의 ref** 를 돌려주는 헬퍼는 템플릿에서도 **`.value`** 를 붙여야 한다
-  (top-level ref 만 자동 언랩된다) → `loginMutation.isPending.value`.
+  (top-level ref 만 자동 언랩된다) → `loginMutation.isPending.value`. `useAction()` 은 구조분해해
+  top-level 변수로 두면 템플릿에서 자동 언랩된다(`const { run: save, isPending: saving } = useAction(...)`).
+- **변경 뒤 갱신**: 명령은 `$api` 직접 호출(보통 `useAction` 으로 감싼다) 후 `invalidateNotices()`·`invalidateBanners()`·
+  `invalidateAccounts()`·`invalidateThrottles()` 로 **화면에 떠 있는** 관련 키(`notices:`·`banners:`·`admin:…` 접두사)와
+  대시보드를 다시 부른다(`refreshDataByPrefix`). 언마운트된 키는 Nuxt 4 가 캐시를 비우므로 다음 마운트 때 새로 불러온다.
+  반응형 키(getter)가 바뀌는 동안 `data` 는 이전 결과를 유지한다 — 목록 페이지 이동 때 화면이 비지 않는다.
+  공개 공지 상세(`notice:public:<id>`)는 조회수가 오르므로 갱신 대상에서 뺐다.
+- **로그아웃**은 스토어를 비우고 `clearNuxtData()` 로 조회 캐시를 **전부** 버린다 — 다음 사용자에게 이전 사용자의 관리자 목록이 비치지 않게.
+
+### 프론트 테스트 (vitest)
+
+- `pnpm test`(= `vitest run`, jsdom). 설정은 `frontend/vitest.config.ts` — Nuxt 런타임 없이 도는 것만 대상이다:
+  `app/lib/**` 순수 모듈(에디터 `richText`·`imageTransform`·`mediaHtml`·`upload`, `apiError`·`returnTo`·`bannerForm`)과
+  **Nuxt 자동 import 에 기대지 않는 컴포넌트**(`components/editor/*`, `RichContent.vue`)를 `@vue/test-utils` 로 마운트한다.
+- 에디터 컴포넌트는 그래서 `vue` API·하위 컴포넌트를 **명시 import** 한다(다른 컴포넌트는 Nuxt 자동 import 를 쓴다).
+  jsdom 에는 `execCommand`·canvas 가 없어 테스트가 `document.execCommand` 를 Range 로 흉내 내고 `lib/editor/imageCanvas` 를 mock 한다.
+- ⛔ 페이지·레이아웃·`useAsyncData` 를 쓰는 컴포넌트는 Nuxt 런타임(`@nuxt/test-utils`)이 필요해 이 설정으로 테스트하지 않는다 —
+  화면 흐름은 실제 백엔드를 붙인 `pnpm dev` 로 확인한다(README "화면 구성").
+- 테스트 파일은 `*.test.ts` 로 대상 옆에 둔다. `components/` 안의 `.test.ts` 는 Nuxt 기본 ignore 패턴이라 컴포넌트로 등록되지 않는다.
 
 ---
 
@@ -732,19 +847,24 @@ export function useLogin() {
   털리는 저장소다. refresh 토큰은 **HttpOnly 쿠키**라 JS 에서 아예 보이지 않고, 브라우저가 알아서
   `/api/v1/auth/*` 요청에만 실어 보낸다(§9).
 - **로그인**: `POST /api/v1/auth/login` 성공 → 바디의 access 토큰을 `auth.setSession(token)` 으로 메모리에 넣고
-  (refresh 쿠키는 응답의 `Set-Cookie` 로 자동 저장, 바디의 `refresh_token` 은 항상 `null`), `setUser(await getMe())` 로 사용자 로드 → 홈 이동.
+  (refresh 쿠키는 응답의 `Set-Cookie` 로 자동 저장, 바디의 `refresh_token` 은 항상 `null`), `setUser(await getMe())` 로 사용자 로드 →
+  `?next=<원래 위치>` 로 복귀(없으면 홈). `next` 는 `lib/returnTo.ts` 의 `safeNext()` 로 **내부 경로만** 받는다(`//host`·`/\host`·절대 URL 거부).
   실패 문구는 상태 코드로 고른다 — 401 "아이디 또는 비밀번호가 올바르지 않습니다", **429 = 계정 잠금**
   (`LOGIN_MAX_FAILURES` 회 연속 실패 시 `LOGIN_LOCKOUT_MINUTES` 동안, §9) "로그인 시도가 너무 많습니다…".
   429 에는 `Retry-After` 가 없으므로 남은 시간을 계산·표시하지 않는다(`composables/useAuth.ts` 의 `useLogin`).
 - **세션 복원(새로고침 대응)**: 메모리 토큰은 새로고침에 날아간다 → **`app/plugins/auth-init.ts`** 가 앱 부팅 시
   `POST /api/v1/auth/refresh` 를 한 번 호출해 쿠키가 살아 있으면 access 토큰을 재발급받는다(없으면 미인증으로 시작).
 - **401 처리**: `$api` 가 401 을 받으면 **refresh 1회(single-flight) 후 원 요청을 재시도**하고,
-  refresh 도 실패하면 세션을 비우고 `/login` 으로 보낸다(§13). ⛔ 개별 컴포넌트에서 401 을 따로 처리하지 않는다.
-- **로그아웃**: `POST /api/v1/auth/logout`(서버가 세션 revoke + 쿠키 삭제, 항상 204) → `auth.logout()`(메모리 비우기) → `/login`.
+  refresh 도 실패하면 세션을 비운다. 지금 화면이 로그인 필요 화면(`/admin/**`, `/me` — `requiresLogin()`)이면
+  `/login?next=<원래 위치>` 로 하드 이동(메모리 캐시도 사라진다), 공개 화면(`/`, `/notices`)이면 그대로 둔다(§13).
+  ⛔ 개별 컴포넌트에서 401 을 따로 처리하지 않는다.
+- **로그아웃**: `POST /api/v1/auth/logout`(서버가 세션 revoke + 쿠키 삭제, 항상 204) → `auth.logout()`(메모리 비우기) →
+  `clearNuxtData()`(조회 캐시 전부) → 홈(`/`, 공개 화면).
   세션이 폐기되면 그 세션의 access 토큰도 `sid` 검사로 **즉시 401** 이 된다 — 다른 탭의 메모리 토큰도 다음 요청에서
-  401 → refresh 실패(쿠키 삭제됨) → `/login` 으로 정리된다.
-- **보호 라우트**: `app/middleware/auth.ts` 라우트 미들웨어가 담당한다(미인증 시 `navigateTo('/login', { replace: true })`).
-  보호할 페이지마다 `definePageMeta({ middleware: 'auth' })` 한 줄을 선언한다 — 파일 위치를 옮길 필요가 없다.
+  401 → refresh 실패(쿠키 삭제됨) → (보호 화면이면) `/login` 으로 정리된다.
+- **보호 라우트**: 라우트 미들웨어가 담당한다. 로그인만 필요한 페이지는 `definePageMeta({ middleware: 'auth' })`
+  (미인증 → `/login?next=<원래 위치>`), 관리자 페이지는 `definePageMeta({ layout: 'admin', middleware: 'admin' })`
+  (미인증 → 로그인, role≠admin → 403). 첫 화면 `/` 와 공지(`/notices`)는 **공개**라 가드가 없다.
 - **SSO(선택)**: `app/pages/login.vue`에서 `window.location.href = ${config.public.backendUrl}/api/v1/auth/login`,
   `app/pages/auth/callback.vue`가 토큰 수신 → `auth.setSession(token)` → `/api/v1/auth/me`로 사용자 로드 → 홈 리다이렉트.
 - ⚠️ 미들웨어는 **`import.meta.client` 일 때만** 리다이렉트한다. `ssr: false` 라도 빌드의 **정적 생성 단계는
@@ -753,40 +873,84 @@ export function useLogin() {
 
 ```
 app/
-├── middleware/auth.ts       # ★ 인증 가드 (definePageMeta 로 페이지에 붙인다)
+├── middleware/
+│   ├── auth.ts              # ★ 로그인 가드 — /me
+│   └── admin.ts             # ★ 관리자 가드 — /admin/** 모든 페이지
 └── pages/
-    ├── index.vue            # /          definePageMeta({ middleware: 'auth' })
-    ├── login.vue            # /login     (가드 없음)
-    ├── landing.vue          # /landing   definePageMeta({ middleware: 'auth' })
-    ├── my.vue               # /my        definePageMeta({ middleware: 'auth' })
+    ├── index.vue            # /              공개 홈
+    ├── login.vue            # /login         layout: false, ?next 복귀
+    ├── me.vue               # /me            middleware: 'auth'   (my.vue → /me 리다이렉트)
+    ├── notices/…            # /notices·/:id  공개
+    ├── admin/…              # /admin/**      layout: 'admin', middleware: 'admin'
     └── auth/callback.vue    # /auth/callback (SSO 콜백 — SSO 도입 시 추가, 스캐폴드에는 없음)
 ```
 
 ```ts
-// app/middleware/auth.ts
-// 정적 생성 단계(Node)에서는 import.meta.client 가 false 라 리다이렉트하지 않고 빈 셸만 만든다.
-export default defineNuxtRouteMiddleware((to) => {
+// app/middleware/admin.ts (요약)
+// 정적 생성 단계(Node)에서는 import.meta.client 가 false 라 아무것도 하지 않고 빈 셸만 만든다.
+export default defineNuxtRouteMiddleware(async (to) => {
   if (!import.meta.client) return
-  const auth = useAuthStore()   // 부팅 시 plugins/auth-init.ts 가 세션 복원을 먼저 시도한다(§14)
-  if (!auth.isAuthenticated && to.path !== "/login") return navigateTo("/login", { replace: true })
+  const authStore = useAuthStore()   // 부팅 시 plugins/auth-init.ts 가 세션 복원을 먼저 끝낸다
+  if (!authStore.isAuthenticated) return navigateTo(loginPath(to.fullPath), { replace: true })
+  if (!authStore.user) authStore.setUser(await useAuthApi().getMe())   // (실패 처리는 본문 참조)
+  // fatal 이어야 클라이언트 이동에서도 error.vue 가 뜬다(아니면 이동만 취소된다).
+  if (authStore.user?.role !== "admin") return createError({ status: 403, statusText: "Forbidden", fatal: true })
 })
 ```
 
 ```vue
-<!-- app/pages/landing.vue — 보호 페이지는 이 한 줄로 가드된다 -->
+<!-- app/pages/admin/system.vue — 관리자 페이지는 이 한 줄로 레이아웃과 가드가 붙는다 -->
 <script setup lang="ts">
-definePageMeta({ middleware: "auth" })
+definePageMeta({ layout: "admin", middleware: "admin" })
 
-const { data: health, status: healthStatus } = useHealthStatus()
-const isLoading = computed(() => healthStatus.value === "idle" || healthStatus.value === "pending")
+const { data: health, status } = useHealthStatus()
+const isLoading = computed(() => isLoadingStatus(status.value))
 </script>
-
-<template>
-  <p v-if="isLoading">확인 중…</p>
-  <p v-else>{{ health?.status }}</p>
-  <NuxtLink to="/">← 메인으로</NuxtLink>
-</template>
 ```
+
+### 화면 구성 · 레이아웃 · 관리자 가드
+
+라우트는 `app/pages/` 파일 구조 그대로다. 레이아웃은 `app/layouts/default.vue`(사용자)·`admin.vue`(관리자 콘솔) 두 개이고,
+로그인 화면만 `layout: false` 다.
+
+| 경로 | 화면 | 접근 |
+|------|------|------|
+| `/` | 홈 — 배너 캐러셀(`GET /banners`, 없으면 기본 히어로) · 주요 서비스(자리표시) · 최신 공지 5건 · 내 계정 | 공개 |
+| `/notices` · `/notices/:id` | 공지 목록(고정 우선·제목 검색·페이지, `page`·`q` 는 URL 쿼리) · 상세(본문 `RichContent`, 첨부 `download_url`) | 공개 |
+| `/login` | 로그인 — 성공 시 `?next=` 로 복귀 | 공개 |
+| `/me` (`/my` → 리다이렉트) | 내 정보 · 로그아웃 | 로그인 |
+| `/admin` | 대시보드 — KPI(사용자·세션·잠금·공지·배너·DB/Alembic) · 최근 활성 세션 5건(강제 종료) · 잠긴 계정(잠금 해제) | admin |
+| `/admin/notices` · `/new` · `/:id/edit` | 공지 목록(임시저장 포함) · 작성/수정(`RichTextEditor` + 첨부 패널 — 첫 저장 뒤 수정 URL 로 전환) | admin |
+| `/admin/banners` · `/new` · `/:id/edit` | 배너 목록(활성 토글 = PUT 전체 본문, 위/아래 이동 = `PATCH /order`) · 작성/수정(이미지 업로드·미리보기, 대체 텍스트 필수) | admin |
+| `/admin/users` · `/admin/sessions` · `/admin/login-throttles` | 사용자(검색·역할 필터·권한/활성 변경·세션 모두 종료) · 세션(`?user_id=` 필터·강제 종료) · 로그인 잠금(해제) | admin |
+| `/admin/system` | 헬스 체크(`/health`, `/health/db`) + DB 상태·Alembic 리비전 (옛 `/landing` 의 상태 배지) | admin |
+| 그 밖 | 404(`error.vue`, 사용자 레이아웃) · `/admin/<없는 경로>` → `/admin` | — |
+
+- **사용자 레이아웃 `layouts/default.vue`** (디자인 A — 상단 내비 포털): 로고·홈·공지사항·자리표시 메뉴(`/#services`·`/#support`),
+  오른쪽은 비로그인 "로그인"(현재 위치를 `next` 로) / 로그인 계정 메뉴(내 정보·로그아웃) + **role=admin 에게만** "관리자 콘솔".
+- **관리자 레이아웃 `layouts/admin.vue`** (디자인 A — 그룹형 사이드바): 메뉴 정의는 `lib/adminNav.ts`(개요·콘텐츠·회원·보안·시스템).
+  현재 메뉴는 `aria-current="page"` + 강조(대시보드만 정확히 일치, 나머지는 하위 경로도 활성), "로그인 잠금" 에 잠긴 계정 수 배지,
+  하단 "사용자 화면으로"·현재 사용자. 1024px 미만은 상단 "메뉴" 버튼이 서랍으로 연다. 페이지·레이아웃은 Nuxt 가 라우트별 청크로 나눈다.
+  메뉴를 추가하면 `lib/adminNav.ts` 와 `app/pages/admin/` 의 페이지(가드 `definePageMeta` 포함)를 함께 만든다.
+- **관리자 가드** = `middleware/admin.ts`. 이것은 **화면 노출용 UX 장치**이고 권한 경계는 백엔드 `require_admin`(비로그인 401, 일반 사용자 403)이다.
+- **이탈 확인**: 공지 작성·수정(`components/admin/NoticeForm.vue`)은 저장하지 않은 변경이 있으면 `onBeforeRouteLeave` 가
+  확인 다이얼로그의 답을 기다리는 Promise 를 돌려 이동을 막고, 새로고침·닫기는 `beforeunload` 로 막는다. 저장·삭제 직후 이동은 막지 않는다.
+  새 공지를 처음 저장하면 `/admin/notices/:id/edit` 로 바꾸고 안내 문구를 `useState("admin:notice-flash")` 로 넘긴다.
+- **파괴적 작업**(삭제·강제 종료·비활성화·권한 변경)은 `UiConfirmDialog` 로 확인한다. 낙관적 갱신은 배너 활성 토글처럼 되돌리기 쉬운 곳에만 쓴다.
+- **오류 문구**: `lib/apiError.ts` 가 도메인 `code`(`self_modification`·`last_admin`·`too_many_attachments`·`unsupported_file_type`…)·413·422 를
+  한국어로 바꾼다. 업로드 전 사전 검사(`lib/uploadRules.ts`·`editorImageProblem`·`lib/linkUrl.ts`)는 백엔드 허용 목록·규칙과 같은 값이다 — 백엔드 설정을 바꾸면 함께 고친다.
+- **업로드**: 모든 업로드는 공용 `$api` 로 `FormData` 필드 `file`(Bearer·401 refresh 가 그대로 적용). 에디터 이미지는
+  `useEditorImageUpload()` 가 만든 함수를 `RichTextEditor` 의 `upload-image` prop 으로 넘긴다. 첨부는 여러 개를 고르면 하나씩 순서대로 올리며
+  파일별 상태·오류를 보여 준다(`$fetch` 는 업로드 진행률 이벤트가 없어 "올리는 중" 만 표시). 관리자 첨부 다운로드는 Bearer 가 필요해
+  blob(`responseType: "blob"`)으로 받아 원래 파일명으로 저장한다(`lib/download.ts`). 공개 첨부는 `download_url` 링크.
+- **파일 URL**: 백엔드가 주는 공개 파일·첨부 URL 은 기본이 루트 상대(`/uploads/public/...`, `/api/v1/notices/.../attachments/...`)다.
+  dev 는 `nitro.devProxy` 가 `/api`·`/uploads` 를 백엔드로 넘긴다. 운영(`nuxt generate` 정적 산출)은 ① 리버스 프록시(nginx 등)가 같은 오리진에서
+  `/api`·`/uploads` 를 백엔드로 넘기거나 ② 백엔드 `.env` 의 `PUBLIC_FILES_BASE_URL` 에 백엔드 공개 주소를 넣어 절대 URL 을 받는다.
+  `NUXT_PUBLIC_API_BASE_URL` 로 API 를 다른 오리진에 둔 경우 `useFileUrl()` 이 루트 상대 URL 앞에 그 오리진을 붙인다.
+- **시각**: 서버 값은 KST naive 문자열이다. `lib/format.ts` 는 `Date` 로 재해석하지 않고 문자열로 자른다. 배너 기간 입력은 `datetime-local` → `YYYY-MM-DDTHH:mm:00`.
+- **리치 에디터**: 라이브러리 없는 `contentEditable` + `execCommand`(`lib/editor/editorDom.ts` 의 `exec()` 한 곳). 프로그램적 변경(크기·대체 텍스트·교체·삽입·삭제)은
+  대상 노드를 `Range.selectNode` 로 고른 뒤 `exec("insertHTML")`/`exec("delete")` 로 커밋해 브라우저 undo 스택에 남긴다. 저장 마크업은 태그·`class` 만(⛔ `style`),
+  유튜브는 `youtube-nocookie` 임베드만. ⚠️ 에디터와 백엔드 정화 허용 목록(`core/sanitize.py`, §8)은 한 쌍이다.
 
 ---
 
@@ -843,6 +1007,9 @@ const isLoading = computed(() => healthStatus.value === "idle" || healthStatus.v
 | `COOKIE_SECURE` | refresh 쿠키의 `Secure` 속성. 로컬 `false`, 운영(HTTPS) `true` — cookie 방식 + `APP_ENV=production` 이면 `true` 필수(아니면 기동 거부) |
 | `CORS_ORIGINS` | 콤마 구분 허용 출처 |
 | `FRONTEND_URL`, `BACKEND_PUBLIC_URL` | 리다이렉트/콜백 |
+| `UPLOAD_DIR` | 업로드 저장 위치(기본 `uploads` → `backend/uploads/`, 상대 경로는 backend 기준). `public/` 만 `/uploads/public` 으로 정적 서빙 (§8) |
+| `PUBLIC_FILES_BASE_URL` | 공개 파일·첨부 다운로드 URL 접두사. 비우면 루트 상대 경로(같은 오리진 또는 `/uploads` 프록시), 다른 오리진이면 백엔드 공개 주소 (§8, §14 "파일 URL") |
+| `MAX_IMAGE_UPLOAD_MB`, `MAX_ATTACHMENT_UPLOAD_MB` | 업로드 크기 상한(MB, 기본 5 / 20) — 초과 시 413. 바꾸면 `frontend/app/lib/uploadRules.ts` 도 맞춘다 |
 | `APP_ENV` | `production` 이면 안전하지 않은 기본값(기본 `SECRET_KEY`, 관리자 시드, Secure 없는 refresh 쿠키)으로 기동을 거부한다 |
 | `SEED_DEFAULT_ADMIN`, `DEFAULT_ADMIN_PASSWORD` | 기동 시 기본 관리자(admin) 시드 여부·초기 비밀번호. **코드 기본값은 꺼짐** — `.env` 에서만 켠다(스캐폴드가 무작위 비밀번호로 켜 준다, §9) |
 | `OAUTH_*` | SSO 도입 시(authorize/token/userinfo URL, client id/secret, redirect uri) |
@@ -851,7 +1018,7 @@ const isLoading = computed(() => healthStatus.value === "idle" || healthStatus.v
 ### 프론트엔드 (`.env`, `NUXT_PUBLIC_` 필수)
 | 키 | 용도 |
 |----|------|
-| `NUXT_PUBLIC_API_BASE_URL` | API 호스트 (없으면 dev proxy `/api/v1`) |
+| `NUXT_PUBLIC_API_BASE_URL` | API 호스트 (없으면 dev proxy `/api/v1`·`/uploads`). 주면 루트 상대 파일 URL(`/uploads/...`) 앞에도 붙인다(`useFileUrl()`) |
 | `NUXT_PUBLIC_BACKEND_URL` | SSO 리다이렉트용 백엔드 호스트 |
 
 - `NUXT_PUBLIC_*` 는 `nuxt.config.ts` 의 `runtimeConfig.public` 키를 덮어쓴다
@@ -897,7 +1064,7 @@ push 전에 반드시 통과시킨다:
 
 ```powershell
 cd backend;  .\.venv\Scripts\python -m pytest -q;  .\.venv\Scripts\python -m ruff check .
-cd ..\frontend;  pnpm lint;  pnpm typecheck;  pnpm build
+cd ..\frontend;  pnpm lint;  pnpm typecheck;  pnpm test;  pnpm build
 ```
 
 - 실패했거나 확인하지 않았으면 push 하지 않는다.
